@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-router-lite"
+version = "0.1.0"
+description = "离线语音控制引擎 - 为瘦设备(128MB MIPS路由器)设计"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Voice Router Team"}
+]
+keywords = ["voice", "offline", "asr", "embedded", "router"]
+
+# ---- 核心依赖 ----
+dependencies = [
+    "numpy>=1.21",
+]
+
+# ---- 可选依赖 ----
+[project.optional-dependencies]
+# 音频 I/O
+audio = [
+    "pyaudio>=0.2",
+]
+
+# ASR + KWS 引擎
+asr = [
+    "sherpa-onnx>=1.10",
+    "onnxruntime>=1.14",
+]
+
+# 降噪处理
+denoise = [
+    "scipy>=1.7",
+    "webrtcvad>=2.0",
+]
+
+# 设备控制 (GPIO)
+gpio = [
+    "RPi.GPIO>=0.7",
+]
+
+# 完整安装
+all = [
+    "numpy>=1.21",
+    "pyaudio>=0.2",
+    "sherpa-onnx>=1.10",
+    "onnxruntime>=1.14",
+    "scipy>=1.7",
+    "webrtcvad>=2.0",
+]
+
+# 开发工具
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23",
+]
+
+[tool.setuptools.packages.find]
+include = ["voice_router_lite*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

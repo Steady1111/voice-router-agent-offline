@@ -1,0 +1,20 @@
+# 核心
+numpy>=1.21
+
+# 音频 I/O (PyAudio)
+pyaudio>=0.2
+
+# ASR + KWS 引擎
+sherpa-onnx>=1.10
+onnxruntime>=1.14
+
+# 降噪与信号处理
+scipy>=1.7
+webrtcvad>=2.0
+
+# 设备 GPIO 控制 (可选, 路由器用)
+# RPi.GPIO>=0.7
+
+# 测试
+pytest>=7.0
+pytest-cov>=4.0
