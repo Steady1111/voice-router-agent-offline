@@ -767,6 +767,7 @@ class DeviceManager:
 def create_default_device_manager(
     esp32_bridge: Optional["ESP32Bridge"] = None,
     use_openwrt_ubus: bool = True,
+    include_mock_devices: bool = True,
 ) -> DeviceManager:
     """创建带默认设备的设备管理器。"""
     mgr = DeviceManager(
@@ -774,9 +775,9 @@ def create_default_device_manager(
         use_openwrt_ubus=use_openwrt_ubus,
     )
 
-    # 注册默认设备
     mgr.register_device("风扇", FanDriver())
-    mgr.register_device("LED", LEDDriver())
-    mgr.register_device("继电器", RelayDriver())
+    if include_mock_devices:
+        mgr.register_device("LED", LEDDriver())
+        mgr.register_device("继电器", RelayDriver())
 
     return mgr

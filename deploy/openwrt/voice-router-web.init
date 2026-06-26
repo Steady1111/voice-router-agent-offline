@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# OpenWrt procd: voice-router-web (FastAPI console, no ALSA)
+
+START=98
+STOP=11
+
+USE_PROCD=1
+VOICE_ROOT=/opt/voice_router
+
+start_service() {
+	procd_open_instance
+	procd_set_param command python3 -m voice_router_lite web
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param nice 15
+	procd_set_param limits core="0"
+	procd_set_param env VOICE_ROUTER_WEB_HOST="0.0.0.0"
+	procd_set_param env VOICE_ROUTER_WEB_PORT="28080"
+	procd_set_param env VOICE_ROUTER_WEB_TTS="0"
+	procd_set_param env VOICE_ROUTER_DEPLOYMENT_MODE="router"
+	procd_close_instance
+}
+
+stop_service() {
+	:
+}

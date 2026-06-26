@@ -208,6 +208,7 @@ class VoiceRouterPipeline:
         # 8. 设备管理
         self._device_manager = create_default_device_manager(
             use_openwrt_ubus=self._config.use_openwrt_ubus,
+            include_mock_devices=(self._config.deployment_mode != "router"),
         )
         self._device_manager.initialize()
 
@@ -326,6 +327,24 @@ class VoiceRouterPipeline:
         # 2. NLU 理解
         nlu_result = self._nlu.understand(text)
 
+        if (
+            self._config.deployment_mode == "router"
+            and nlu_result.intent.startswith("router_")
+            and nlu_result.confidence < self._config.nlu_confidence_threshold
+        ):
+            self._set_state(PipelineState.IDLE)
+            msg = "没听清，请再说一次"
+            if self._config.enable_tts_feedback:
+                self._tts.speak_sentence(msg, blocking=False)
+            return {
+                "success": False,
+                "text": text,
+                "intent": nlu_result.intent,
+                "confidence": nlu_result.confidence,
+                "slots": nlu_result.slots,
+                "message": msg,
+            }
+
         # 3. 执行指令
         if nlu_result.is_valid:
             exec_result = self._device_manager.execute_command(
@@ -335,9 +354,13 @@ class VoiceRouterPipeline:
             # 4. TTS 反馈
             self._set_state(PipelineState.EXECUTING)
             if self._config.enable_tts_feedback:
-                self._tts.speak_feedback(
-                    nlu_result.intent, nlu_result.slots, blocking=False
-                )
+                reply = exec_result.get("message") or text
+                if exec_result.get("success"):
+                    self._tts.speak_sentence(reply, blocking=False)
+                else:
+                    self._tts.speak_feedback(
+                        nlu_result.intent, nlu_result.slots, blocking=False
+                    )
         else:
             exec_result = {"success": False, "message": "无法理解指令"}
             self._set_state(PipelineState.IDLE)

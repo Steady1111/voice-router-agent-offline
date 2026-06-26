@@ -19,6 +19,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from voice_router_lite.asr import ASREngine
 from voice_router_lite.config import DEFAULT_CONFIG
 from voice_router_lite.kws.engine import KWSEngine, KWSResult
+from voice_router_lite.web.asr_debug import save_asr_debug_sample
 from voice_router_lite.web.feedback import emit_ui_event, push_voice_feedback
 from voice_router_lite.web.monitor import get_monitor
 from voice_router_lite.web.service import WebCommandService
@@ -160,14 +161,17 @@ async def _run_esp32_kws_session(
     SILENCE_TIMEOUT = 2.0
     MAX_UTTERANCE = 8.0
     MAX_COLLECT_SEC = 10.0
-    WAKE_SKIP_SEC = 0.25
-    ENERGY_WAKE_SKIP_SEC = 0.25
+    WAKE_SKIP_SEC = float(os.getenv("VOICE_ROUTER_KWS_SKIP_SEC", os.getenv("VOICE_ROUTER_SKIP_SEC", "0.3")))
+    ENERGY_WAKE_SKIP_SEC = float(os.getenv("VOICE_ROUTER_ENERGY_SKIP_SEC", os.getenv("VOICE_ROUTER_SKIP_SEC", "0.25")))
     COOLDOWN_SEC = 4.0
     COOLDOWN_FAIL_SEC = 0.8
-    KWS_SKIP_SEC = 0.3
+    MIN_COMMAND_SEC = float(os.getenv("VOICE_ROUTER_MIN_COMMAND_SEC", "1.8"))
     SPEECH_THRESHOLD = 0.05
     MIN_ASR_BYTES = 16000
     MIN_COMMAND_BYTES = 48000       # 至少 ~1.5s 指令音频再结束
+    KWS_SKIP_SEC = WAKE_SKIP_SEC
+    current_wake_source = ""
+
     USE_ESP32_RECORD_MODE = os.getenv("VOICE_ROUTER_ESP32_RECORD_MODE", "0").lower() in {
         "1", "true", "yes",
     }
@@ -193,11 +197,12 @@ async def _run_esp32_kws_session(
     collect_skip_sec = 0.0
     esp32_record_mode = False
 
-    async def _notify_wake(keyword: str, confidence: float) -> None:
+    async def _notify_wake(keyword: str, confidence: float, *, wake_source: str = "") -> None:
         payload = {
             "event": "wake_detected",
             "keyword": keyword,
             "confidence": confidence,
+            "wake_source": wake_source,
         }
         await _send_json(websocket, payload)
         await emit_ui_event(hub, payload, source="esp32")
@@ -233,8 +238,9 @@ async def _run_esp32_kws_session(
         await push_voice_feedback(hub, tts, reply_text, success=success)
 
     async def finish_collecting(reason: str) -> None:
-        nonlocal state, collect_start_time, collect_skip_sec, esp32_record_mode, wake_cooldown_until
+        nonlocal state, collect_start_time, collect_skip_sec, esp32_record_mode, wake_cooldown_until, current_wake_source
         total_dur = len(asr_buffer) / 2 / 16000
+        peak = int(np.max(np.abs(np.frombuffer(bytes(asr_buffer), dtype=np.int16)))) if len(asr_buffer) >= 2 else 0
         logger.info(
             "[ESP32 KWS] 指令结束(%s): dur=%.1fs bytes=%d",
             reason, total_dur, len(asr_buffer),
@@ -246,6 +252,9 @@ async def _run_esp32_kws_session(
 
         transcript = ""
         success = False
+        result: dict[str, Any] = {}
+        raw_asr = ""
+        display_cmd = ""
         if asr_ok and len(asr_buffer) >= MIN_ASR_BYTES:
             try:
                 audio_np = np.frombuffer(bytes(asr_buffer), dtype=np.int16).copy()
@@ -303,6 +312,7 @@ async def _run_esp32_kws_session(
                         peak, fan_on, transcript,
                     )
                     result = command_service.handle_text(transcript, voice_wake=True)
+                    success = bool(result.get("success", False))
                     display_cmd = result.get("command") or transcript
                     await _notify_transcript(display_cmd, corrected=True)
                     reply_text = result.get("reply", "")
@@ -331,6 +341,21 @@ async def _run_esp32_kws_session(
                     "[ESP32 KWS] ASR 无结果 (reason=%s bytes=%d need>=%d)",
                     reason, len(asr_buffer), MIN_ASR_BYTES,
                 )
+
+        try:
+            save_asr_debug_sample(
+                bytes(asr_buffer),
+                raw_asr=raw_asr or transcript,
+                repaired=(result.get("transcript") or "") if result else "",
+                command=display_cmd or ((result.get("command") or "") if result else ""),
+                intent=str(result.get("intent") or "") if result else "",
+                success=success,
+                wake_source=current_wake_source,
+                reason=reason,
+                peak=peak,
+            )
+        except Exception:
+            logger.exception("[ESP32 KWS] asr_debug 保存失败")
 
         await asyncio.sleep(0.5)
         await _send_json(websocket, {"event": "start_kws"})
@@ -381,7 +406,8 @@ async def _run_esp32_kws_session(
                         asr_buffer.clear()
                         last_speech_time = 0.0
                         silence_start = 0.0
-                        await _notify_wake("按键", 1.0)
+                        current_wake_source = "button"
+                        await _notify_wake("按键", 1.0, wake_source="button")
                         logger.info("[ESP32 KWS] 🔘 按键唤醒 → 开始采集指令")
                 elif event == "device_state":
                     _handle_esp32_state(command_service, payload)
@@ -462,9 +488,11 @@ async def _run_esp32_kws_session(
                     if USE_ESP32_RECORD_MODE:
                         esp32_record_mode = True
                         await _send_json(websocket, {"event": "start_record"})
+                    current_wake_source = "energy_wake" if from_energy_wake else "kws"
                     await _notify_wake(
                         kws_result.keyword or "小T小T",
                         kws_result.confidence,
+                        wake_source=current_wake_source,
                     )
                     logger.info(
                         "[ESP32 KWS] 🎤 唤醒 → 开始采集指令 (skip=%.1fs energy=%s)",
@@ -494,7 +522,7 @@ async def _run_esp32_kws_session(
                 silence_dur = now - silence_start if silence_start > 0 else 0
                 collect_elapsed = now - collect_start_time if collect_start_time > 0 else 0
 
-                min_collect_elapsed = collect_skip_sec + 1.8
+                min_collect_elapsed = collect_skip_sec + MIN_COMMAND_SEC
                 should_finish = (
                     (
                         silence_dur > SILENCE_TIMEOUT
@@ -583,11 +611,14 @@ def _do_asr(asr: ASREngine, audio_np: np.ndarray) -> str:
 
 def _handle_esp32_state(command_service: WebCommandService, payload: dict) -> None:
     """处理 ESP32 上报的设备状态。"""
+    import datetime
+
     device_type = payload.get("device_type", "")
     state = payload.get("state", {})
     if device_type == "fan":
         on = bool(state.get("on", False))
         level = int(state.get("level", 0))
+        command_service.last_ack_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         logger.info("[ESP32 KWS] 风扇 ACK: on=%s level=%d", on, level)
     if device_type and command_service.esp32_bridge and command_service.esp32_bridge._on_device_state:
         try:

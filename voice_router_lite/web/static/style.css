@@ -108,6 +108,38 @@ main {
   top: 62px;
 }
 
+body:not(.debug-mode) .debug-only {
+  display: none !important;
+}
+
+.status-card h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+
+.status-lines {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-lines li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  gap: 12px;
+}
+
+.status-lines li span:last-child {
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+}
+
 /* ========== 唤醒卡片 ========== */
 .wake-card {
   display: flex;
@@ -476,7 +508,7 @@ main {
 }
 
 /* ========== 响应式 ========== */
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   main {
     grid-template-columns: 1fr;
     padding: 12px;

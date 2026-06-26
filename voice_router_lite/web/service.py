@@ -9,6 +9,7 @@ ESP32 桥接: 通过 esp32_bridge 实现风扇/显示/OLED 的硬件控制透传
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -264,12 +265,18 @@ class WebCommandService:
         self.devices: DeviceManager = create_default_device_manager(
             esp32_bridge=self.esp32_bridge,
         )
+        self.last_command: str = ""
+        self.last_ack_at: str | None = None
         self._initialized = False
 
     def initialize(self) -> None:
         if self._initialized:
             return
-        self.nlu.initialize()
+        prefer_int8 = (
+            self.config.prefer_int8_nlu
+            or os.getenv("VOICE_ROUTER_PREFER_INT8_NLU", "").lower() in {"1", "true", "yes"}
+        )
+        self.nlu.initialize(prefer_int8=prefer_int8)
         self.devices.initialize()
         self._initialized = True
 
@@ -296,12 +303,34 @@ class WebCommandService:
             self.devices.close()
         self._initialized = False
 
-    def list_devices(self) -> list[dict[str, Any]]:
+    def list_devices(self, *, include_mock: bool = False) -> list[dict[str, Any]]:
         self.initialize()
-        return [
+        items = [
             _device_state_to_api(device_id, state)
             for device_id, state in self.devices.get_all_states().items()
         ]
+        if include_mock:
+            if not any(d.get("type") == "router" for d in items):
+                items.append({
+                    "id": "router",
+                    "name": "路由器",
+                    "type": "router",
+                    "state": "on",
+                    "level": None,
+                    "updated_at": None,
+                })
+            return items
+        items = [d for d in items if d.get("type") in ("fan", "router")]
+        if not any(d.get("type") == "router" for d in items):
+            items.append({
+                "id": "router",
+                "name": "路由器",
+                "type": "router",
+                "state": "on",
+                "level": None,
+                "updated_at": None,
+            })
+        return items
 
     def handle_text(self, text: str, *, voice_wake: bool = False) -> dict[str, Any]:
         self.initialize()
@@ -336,6 +365,28 @@ class WebCommandService:
             voice_wake=voice_wake,
             had_keyword=keyword_result is not None,
         )
+
+        strict_router = (
+            self.config.deployment_mode == "router"
+            or os.getenv("VOICE_ROUTER_STRICT_ROUTER_NLU", "").lower() in {"1", "true", "yes"}
+        )
+        if (
+            strict_router
+            and nlu_result.intent.startswith("router_")
+            and nlu_result.confidence < self.config.nlu_confidence_threshold
+        ):
+            return {
+                "success": False,
+                "asr_text": asr_text,
+                "transcript": clean_text,
+                "command": clean_text,
+                "corrected": clean_text != asr_text,
+                "reply": "没听清，请再说一次",
+                "intent": nlu_result.intent,
+                "confidence": nlu_result.confidence,
+                "slots": nlu_result.slots,
+            }
+
         if nlu_result.is_valid:
             exec_result = self.devices.execute_command(
                 nlu_result.intent,
@@ -349,6 +400,8 @@ class WebCommandService:
             asr_text, clean_text, nlu_result, success=success,
         )
         reply = _format_reply(clean_text, nlu_result.intent, nlu_result.slots, exec_result)
+        if success and command:
+            self.last_command = command
         return {
             "success": success,
             "asr_text": asr_text,

@@ -1,11 +1,22 @@
 // DOM 缓存
+const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+
 const els = {
   talkBtn: document.getElementById("talk-btn"),
   ttsPlayer: document.getElementById("tts-player"),
-  deviceList: document.getElementById("device-list"),
+  routerDot: document.getElementById("router-dot"),
+  routerHeaderText: document.getElementById("router-header-text"),
+  fanDot: document.getElementById("fan-dot"),
+  fanHeaderText: document.getElementById("fan-header-text"),
+  routerWan: document.getElementById("router-wan"),
+  routerClients: document.getElementById("router-clients"),
+  routerDaemon: document.getElementById("router-daemon"),
+  routerRam: document.getElementById("router-ram"),
+  fanEsp32: document.getElementById("fan-esp32"),
+  fanState: document.getElementById("fan-state"),
+  fanLevel: document.getElementById("fan-level"),
+  fanLastCmd: document.getElementById("fan-last-cmd"),
   // 顶栏状态
-  netDot: document.getElementById("net-dot"),
-  netText: document.getElementById("net-text"),
   wakeDot: document.getElementById("wake-dot"),
   wakeText: document.getElementById("wake-text"),
   // 唤醒卡片
@@ -72,11 +83,27 @@ let pendingTtsFormat = "mpeg";
 let speechKeepAlive = null;
 let preferredVoice = null;
 
-// 优先使用中文女声（macOS: Ting-Ting / Sinji；Windows: Huihui / Xiaoxiao 等）
-const FEMALE_VOICE_HINTS = [
-  "Ting-Ting", "Meijia", "Sinji", "Lili", "Yu-shu", "Huihui",
-  "Xiaoxiao", "Xiaoyi", "Xiaoni", "Xiaorui", "Female", "女",
+// 中文女声优选（按流畅度/自然度排序；越靠前越优先）
+const FEMALE_VOICE_PRIORITY = [
+  /Xiaoxiao/i,       // Windows / Edge 神经网络女声
+  /Xiaoyi/i,
+  /Tingting/i,
+  /Ting-Ting/i,      // macOS 女声
+  /Meijia/i,
+  /Sinji/i,
+  /Sin-Ji/i,
+  /Lili/i,
+  /Huihui/i,
+  /Xiaoni/i,
+  /Xiaorui/i,
+  /Yaoyao/i,
+  /Female/i,
+  /女/,
 ];
+
+// 明确排除的男声
+const MALE_VOICE_PATTERN =
+  /Kangkang|Li-mu|Li-Mu|Yunjian|Yunxi|Yunfeng|Yunyang|男|Male|Daniel|Fred|Grandpa|Google 普通话（中国大陆）/i;
 
 function stopSpeechKeepAlive() {
   if (speechKeepAlive) {
@@ -93,34 +120,86 @@ function preloadSpeechVoices() {
 }
 
 function pickChineseFemaleVoice(voices) {
-  const zh = voices.filter((v) => v.lang.replace("_", "-").startsWith("zh"));
-  for (const hint of FEMALE_VOICE_HINTS) {
-    const hit = zh.find((v) => v.name.includes(hint));
+  const zh = voices.filter((v) => {
+    const lang = v.lang.replace("_", "-").toLowerCase();
+    return lang.startsWith("zh");
+  });
+  if (!zh.length) return null;
+
+  for (const pattern of FEMALE_VOICE_PRIORITY) {
+    const hit = zh.find((v) => pattern.test(v.name) && !MALE_VOICE_PATTERN.test(v.name));
     if (hit) return hit;
   }
-  const avoidMale = /Kangkang|Li-mu|Yunjian|男|Male/i;
-  return zh.find((v) => !avoidMale.test(v.name)) || zh[0] || null;
+
+  const notMale = zh.filter((v) => !MALE_VOICE_PATTERN.test(v.name));
+  // 优先本地语音包，通常比默认 Google 男声更自然
+  const local = notMale.find((v) => v.localService);
+  if (local) return local;
+
+  return notMale[0] || null;
+}
+
+function ensureSpeechVoices() {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) {
+      resolve([]);
+      return;
+    }
+    const existing = window.speechSynthesis.getVoices();
+    if (existing.length > 0) {
+      resolve(existing);
+      return;
+    }
+    const onChange = () => {
+      window.speechSynthesis.removeEventListener("voiceschanged", onChange);
+      resolve(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener("voiceschanged", onChange);
+    setTimeout(() => {
+      window.speechSynthesis.removeEventListener("voiceschanged", onChange);
+      resolve(window.speechSynthesis.getVoices());
+    }, 800);
+  });
+}
+
+function preloadSpeechVoices() {
+  if (!window.speechSynthesis) return;
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return;
+  preferredVoice = pickChineseFemaleVoice(voices);
+  if (preferredVoice) {
+    console.log("[TTS] 已选女声:", preferredVoice.name, preferredVoice.lang);
+  }
 }
 
 if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = preloadSpeechVoices;
   preloadSpeechVoices();
+  ensureSpeechVoices().then((voices) => {
+    if (voices.length) {
+      preferredVoice = pickChineseFemaleVoice(voices);
+      if (preferredVoice) {
+        console.log("[TTS] 已选女声:", preferredVoice.name, preferredVoice.lang);
+      }
+    }
+  });
 }
 
-function speakReply(text) {
+async function speakReply(text) {
   if (!text || !window.speechSynthesis) return;
   stopSpeechKeepAlive();
   window.speechSynthesis.cancel();
-  const voices = window.speechSynthesis.getVoices();
-  if (!preferredVoice && voices.length) {
-    preferredVoice = pickChineseFemaleVoice(voices);
-  }
+
+  const voices = await ensureSpeechVoices();
+  const voice = preferredVoice || pickChineseFemaleVoice(voices);
+  if (voice) preferredVoice = voice;
+
   const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = "zh-CN";
-  utter.rate = 0.92;
-  utter.pitch = 1.05;
+  utter.lang = voice?.lang?.startsWith("zh") ? voice.lang : "zh-CN";
+  utter.rate = 0.98;
+  utter.pitch = 1.02;
   utter.volume = 1.0;
-  if (preferredVoice) utter.voice = preferredVoice;
+  if (voice) utter.voice = voice;
   utter.onend = stopSpeechKeepAlive;
   utter.onerror = stopSpeechKeepAlive;
   window.speechSynthesis.speak(utter);
@@ -146,7 +225,7 @@ function onWsMessage(ev) {
       case "reply":
         addChatMessage("assistant", msg.text, msg.source);
         refreshDevices();
-        refreshNetwork();
+        refreshRouterStatus();
         resetWakeStatus();
         // 延迟一帧再播，避免与 DOM 更新抢焦点
         setTimeout(() => speakReply(msg.text), 0);
@@ -164,9 +243,11 @@ function onWsMessage(ev) {
           pendingAudioChunks = [];
         }
         break;
-      case "wake_detected":
-        showWakeDetected(msg.keyword);
+      case "wake_detected": {
+        const src = msg.wake_source ? ` · ${msg.wake_source}` : "";
+        showWakeDetected(msg.keyword, src);
         break;
+      }
       case "collecting":
         showCollecting(msg.text);
         break;
@@ -330,71 +411,104 @@ els.textForm.addEventListener("submit", async (e) => {
   refreshDevices();
 });
 
-// ====== 设备列表 ======
-async function refreshDevices() {
+function resetWakeStatus() {
+  if (els.wakeCard) {
+    els.wakeCard.classList.remove("active");
+    els.wakeLabel.textContent = "离线语音控制台";
+    els.wakeTime.textContent = "";
+  }
+  els.wakeDot.classList.remove("active");
+  els.wakeText.textContent = "等待唤醒";
+  if (wakeTimer) clearTimeout(wakeTimer);
+  wakeTimer = null;
+}
+
+// ====== 路由器 / 风扇状态卡 ======
+async function refreshRouterStatus() {
   try {
-    const resp = await fetch("/api/devices");
-    const devices = await resp.json();
-    els.deviceList.innerHTML = devices.map((d) => {
-      const isOn = d.state === "on" || d.state === "open";
-      const icon = DEVICE_ICONS[d.id] || "📦";
-      const meta = [];
-      if (d.level !== undefined) meta.push(`${d.level}%`);
-      if (d.brightness !== undefined) meta.push(`${d.brightness}`);
-      if (d.temperature !== undefined) meta.push(`${d.temperature}°C`);
-      if (d.mode) meta.push(d.mode);
-      return `
-        <li>
-          <div class="device-item-left">
-            <span class="device-icon">${icon}</span>
-            <span class="device-name">${d.name}</span>
-          </div>
-          <div class="device-item-right">
-            <span class="device-state ${isOn ? "on" : "off"}">${isOn ? "开" : "关"}</span>
-            ${meta.length ? `<span class="device-meta">${meta.join(" · ")}</span>` : ""}
-          </div>
-        </li>`;
-    }).join("");
+    const resp = await fetch("/api/router-status");
+    const data = await resp.json();
+    const wanOk = !!data.wan_up;
+    if (els.routerDot) {
+      els.routerDot.classList.toggle("ok", wanOk);
+      els.routerDot.classList.toggle("bad", !wanOk);
+    }
+    if (els.routerHeaderText) {
+      els.routerHeaderText.textContent = wanOk ? "路由器在线" : "路由器离线";
+    }
+    if (els.routerWan) els.routerWan.textContent = wanOk ? "已连接" : "断开";
+    if (els.routerClients) {
+      els.routerClients.textContent = data.lan_clients == null ? "—" : String(data.lan_clients);
+    }
+    if (els.routerDaemon) els.routerDaemon.textContent = data.voice_daemon || "—";
+    if (els.routerRam && data.ram_used_mb != null) {
+      els.routerRam.textContent = `${data.ram_used_mb} / ${data.ram_total_mb || 128} MB`;
+    }
   } catch { /* ignore */ }
+}
+
+async function refreshFanStatus() {
+  try {
+    const resp = await fetch("/api/esp32-status");
+    const data = await resp.json();
+    const connected = !!data.connected;
+    const fanOn = data.fan?.on;
+    if (els.fanDot) {
+      els.fanDot.classList.toggle("ok", connected);
+      els.fanDot.classList.toggle("bad", !connected);
+    }
+    if (els.fanHeaderText) {
+      els.fanHeaderText.textContent = connected ? "风扇在线" : "风扇离线";
+    }
+    if (els.fanEsp32) els.fanEsp32.textContent = connected ? "已连接" : "未连接";
+    if (els.fanState) {
+      if (!connected) els.fanState.textContent = "—";
+      else els.fanState.textContent = fanOn ? "开" : "关";
+    }
+    if (els.fanLevel) {
+      els.fanLevel.textContent = connected && data.fan?.level != null ? `${data.fan.level} 档` : "—";
+    }
+    if (els.fanLastCmd) {
+      els.fanLastCmd.textContent = data.last_command || "—";
+    }
+  } catch { /* ignore */ }
+}
+
+async function refreshDevices() {
+  await refreshFanStatus();
 }
 
 // ====== 网络状态 ======
 async function refreshNetwork() {
-  try {
-    const resp = await fetch("/api/network");
-    const data = await resp.json();
-    els.netDot.classList.toggle("ok", data.online);
-    els.netDot.classList.toggle("bad", !data.online);
-    els.netText.textContent = data.online
-      ? `在线`
-      : `离线(${data.consecutive_failures})`;
-  } catch {
-    els.netText.textContent = "未知";
-  }
+  await refreshRouterStatus();
 }
 
 // ====== 唤醒状态 ======
 let wakeTimer = null;
 
-function showWakeDetected(keyword) {
+function showWakeDetected(keyword, sourceHint = "") {
   const now = new Date();
   const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const label = keyword ? `已唤醒（${keyword}），正在听指令…` : "已唤醒，正在听指令…";
+  const label = keyword
+    ? `已唤醒（${keyword}）${sourceHint}，正在听指令…`
+    : `已唤醒${sourceHint}，正在听指令…`;
 
-  els.wakeCard.classList.add("active");
-  els.wakeLabel.textContent = label;
-  els.wakeTime.textContent = timeStr;
+  if (els.wakeCard) {
+    els.wakeCard.classList.add("active");
+    els.wakeLabel.textContent = label;
+    els.wakeTime.textContent = timeStr;
+  }
 
   els.wakeDot.classList.add("active");
-  els.wakeText.textContent = "唤醒 " + timeStr;
+  els.wakeText.textContent = "唤醒 " + timeStr + (sourceHint || "");
 
   if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = setTimeout(resetWakeStatus, 8000);
 }
 
 function showCollecting(text) {
-  els.wakeCard.classList.add("active");
-  els.wakeLabel.textContent = text || "正在听指令…";
+  if (els.wakeCard) els.wakeCard.classList.add("active");
+  if (els.wakeLabel) els.wakeLabel.textContent = text || "正在听指令…";
   els.wakeDot.classList.add("active");
   els.wakeText.textContent = "录音中";
 }
@@ -741,11 +855,22 @@ if (els.monitorToggle) {
   });
 }
 
+function applyDebugMode() {
+  document.body.classList.toggle("debug-mode", DEBUG);
+  if (!DEBUG && els.monitorPanel) {
+    els.monitorPanel.classList.add("collapsed");
+  }
+}
+
 // ====== 初始化 ======
+applyDebugMode();
 buildMonitorCards();
-refreshDevices();
+refreshRouterStatus();
+refreshFanStatus();
+if (DEBUG) refreshMonitor();
 refreshNetwork();
-refreshMonitor();
+setInterval(refreshRouterStatus, 10000);
+setInterval(refreshFanStatus, 5000);
 setInterval(refreshNetwork, 10000);
-setInterval(refreshMonitor, 2000);
+if (DEBUG) setInterval(refreshMonitor, 2000);
 ensureSocket();

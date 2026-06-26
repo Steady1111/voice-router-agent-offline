@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 
 from voice_router_lite.web.monitor import get_monitor
+from voice_router_lite.web.router_status import get_esp32_status_extended, get_router_status
 from voice_router_lite.web.ws_audio import run_audio_session
 
 router = APIRouter()
@@ -18,8 +19,13 @@ async def health() -> dict[str, str]:
 
 
 @router.get("/api/devices")
-async def list_devices(request: Request) -> list[dict]:
-    return request.app.state.command_service.list_devices()
+async def list_devices(request: Request, debug: bool = False) -> list[dict]:
+    return request.app.state.command_service.list_devices(include_mock=debug)
+
+
+@router.get("/api/router-status")
+async def router_status(request: Request) -> dict:
+    return get_router_status(request.app.state.command_service)
 
 
 @router.get("/api/network")
@@ -51,7 +57,6 @@ async def text_command(request: Request) -> dict:
         elapsed = (time.perf_counter() - t0) * 1000
         success = bool(result.get("success", False))
         get_monitor().record_request(elapsed, success)
-        # 记录 NLU 置信度
         if result.get("confidence") is not None:
             get_monitor().record_accuracy(float(result["confidence"]))
         return result
@@ -62,16 +67,8 @@ async def text_command(request: Request) -> dict:
 
 @router.get("/api/esp32-status")
 async def esp32_status(request: Request) -> dict:
-    """查询 ESP32 连接状态。"""
-    bridge = request.app.state.command_service.esp32_bridge
-    if bridge is None:
-        return {"connected": False, "count": 0, "sessions": []}
-    sessions = bridge.sessions
-    return {
-        "connected": len(sessions) > 0,
-        "count": len(sessions),
-        "sessions": [{"host": s.client_host} for s in sessions],
-    }
+    """查询 ESP32 连接与风扇状态。"""
+    return get_esp32_status_extended(request.app.state.command_service)
 
 
 @router.websocket("/ws/audio")

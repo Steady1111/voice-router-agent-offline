@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# Legacy alias → use voice-routerd.init + voice-router-web.init
+# OpenWrt procd: voice-routerd (KWS/ASR/NLU/TTS daemon only)
 
 START=99
 STOP=10

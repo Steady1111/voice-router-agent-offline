@@ -13,6 +13,7 @@ import time
 
 from voice_router_lite.config import PipelineConfig, router_default_config
 from voice_router_lite.pipeline import VoiceRouterPipeline
+from voice_router_lite.router.memory_log import log_rss_mb
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,14 @@ def run_router_daemon(config: PipelineConfig | None = None) -> int:
     )
     logger.info("=" * 50)
 
+    log_rss_mb("daemon_start")
+
     pipeline = VoiceRouterPipeline(cfg)
     pipeline.initialize()
+    log_rss_mb("after_initialize")
+
     pipeline.start_listening()
+    log_rss_mb("after_kws_listen")
 
     stop = False
 
@@ -55,6 +61,7 @@ def run_router_daemon(config: PipelineConfig | None = None) -> int:
     finally:
         pipeline.stop_listening()
         pipeline.close()
+        log_rss_mb("after_shutdown")
         logger.info("Voice Router 守护进程已退出")
 
     return 0
