@@ -78,8 +78,8 @@ class VoiceRouterPipeline:
     - ASR 延迟: < 1.5s
     - NLU 延迟: < 100ms
     - 端到端: < 2s
-    - 内存: < 50MB
-    - 模型体积: < 35MB
+    - 内存: 峰值引擎 ~48MB（ASR 按需加载/卸载）
+    - 模型体积: ~41MB（ASR 25 + KWS 5 + NLU 11）
 
     使用方法:
         pipeline = VoiceRouterPipeline()
@@ -106,23 +106,30 @@ class VoiceRouterPipeline:
 
         # 设备控制层
         self._device_manager: Optional[DeviceManager] = None
+        self._scheduler = None
 
         # 状态管理
         self._state = PipelineState.IDLE
         self._state_lock = threading.Lock()
 
-        # 事件回调
-        self._on_wake: Optional[Callable[[KWSResult], None]] = None
-        self._on_result: Optional[Callable[[Dict[str, Any]], None]] = None
-        self._on_error: Optional[Callable[[str], None]] = None
+        # 事件回调 (支持多个)
+        self._on_wake_callbacks: list[Callable[[KWSResult], None]] = []
+        self._on_result_callbacks: list[Callable[[Dict[str, Any]], None]] = []
+        self._on_error_callbacks: list[Callable[[str], None]] = []
 
         # 后台监听
         self._listening_thread: Optional[threading.Thread] = None
         self._running: bool = False
 
-        # 录音缓冲
+        # 录音缓冲（KWS 唤醒后收集指令）
         self._utterance_buffer: list[np.ndarray] = []
-        self._max_utterance_duration_sec: float = 10.0  # 最长录音 10 秒
+        self._max_utterance_duration_sec: float = 10.0
+        self._wake_cooldown_until: float = 0.0
+        self._skip_frames_until: float = 0.0
+        self._last_speech_time: float = 0.0
+        self._silence_start: float = 0.0
+        self._speech_threshold: float = 0.008
+        self._wake_cooldown_sec: float = 2.0
 
     # ==================================================================
     # 公开 API: 生命周期
@@ -139,6 +146,21 @@ class VoiceRouterPipeline:
         logger.info("VoiceRouterPipeline 初始化开始...")
         logger.info("=" * 50)
 
+        # 同步音频预处理开关
+        self._config.audio.denoise_enabled = self._config.enable_denoise
+        self._config.audio.aec_enabled = self._config.enable_aec
+
+        # 可选 cgroup 限制（OpenWrt/Linux）
+        if self._config.enable_cgroups:
+            try:
+                from voice_router_lite.platform.cgroups import apply_resource_limits
+                apply_resource_limits(
+                    cpu_quota_pct=self._config.cgroup_cpu_quota_pct,
+                    memory_mb=self._config.cgroup_memory_mb,
+                )
+            except Exception as exc:
+                logger.debug("cgroup 限制跳过: %s", exc)
+
         # 1. 音频捕获
         self._capture = AudioCapture(self._config.audio)
         self._capture.open()
@@ -147,28 +169,61 @@ class VoiceRouterPipeline:
         self._preprocessor = AudioPreprocessor(self._config.audio)
 
         # 3. VAD
-        self._vad = VoiceActivityDetector(self._config.audio)
+        if self._config.enable_vad:
+            self._vad = VoiceActivityDetector(self._config.audio)
+        else:
+            self._vad = None
 
         # 4. KWS 唤醒词
-        if self._config.enable_kws:
-            self._kws = KWSEngine(self._config.models, self._config.audio)
+        if self._config.enable_kws and self._config.wake_word_threshold >= 0:
+            self._kws = KWSEngine(
+                self._config.models,
+                self._config.audio,
+                wake_word_threshold=self._config.wake_word_threshold,
+            )
             self._kws.initialize()
+        else:
+            self._kws = None
 
-        # 5. ASR 语音识别
-        self._asr = ASREngine(self._config.models, self._config.audio)
-        self._asr.initialize()
+        # 5. ASR 语音识别（支持按需加载）
+        self._asr = ASREngine(
+            self._config.models,
+            self._config.audio,
+            num_threads=self._config.asr_num_threads,
+        )
+        if not self._config.asr_lazy_load:
+            self._asr.initialize()
 
         # 6. NLU 指令理解
-        self._nlu = NLUEngine(self._config.models)
-        self._nlu.initialize()
+        self._nlu = NLUEngine(
+            self._config.models,
+            confidence_threshold=self._config.nlu_confidence_threshold,
+        )
+        self._nlu.initialize(prefer_int8=self._config.prefer_int8_nlu)
 
         # 7. TTS 语音反馈
         self._tts = TTSEngine(self._config.models, self._config.audio)
         self._tts.initialize()
 
         # 8. 设备管理
-        self._device_manager = create_default_device_manager()
+        self._device_manager = create_default_device_manager(
+            use_openwrt_ubus=self._config.use_openwrt_ubus,
+        )
         self._device_manager.initialize()
+
+        # 9. 路由器量产：分时模型调度
+        if self._config.deployment_mode == "router" or (
+            self._config.model_serial_exclusive or self._config.asr_subprocess
+        ):
+            from voice_router_lite.router.model_scheduler import ModelScheduler
+            self._scheduler = ModelScheduler(self._config, self._kws, self._asr)
+            logger.info(
+                "ModelScheduler 已启用: serial=%s subprocess=%s",
+                self._config.model_serial_exclusive,
+                self._config.asr_subprocess,
+            )
+        else:
+            self._scheduler = None
 
         logger.info("VoiceRouterPipeline 初始化完成 ✅")
         self._log_memory_estimate()
@@ -205,6 +260,8 @@ class VoiceRouterPipeline:
         for name, comp in components:
             if comp:
                 try:
+                    if name == "ASR" and hasattr(comp, "unload"):
+                        comp.unload()
                     comp.close()
                 except Exception as e:
                     logger.warning("关闭 %s 异常: %s", name, e)
@@ -219,16 +276,16 @@ class VoiceRouterPipeline:
     # ==================================================================
 
     def on_wake(self, callback: Callable[[KWSResult], None]) -> None:
-        """注册唤醒回调 (收到唤醒词时调用)"""
-        self._on_wake = callback
+        """注册唤醒回调 (收到唤醒词时调用，支持多次注册)"""
+        self._on_wake_callbacks.append(callback)
 
     def on_result(self, callback: Callable[[Dict[str, Any]], None]) -> None:
-        """注册结果回调 (指令执行完成时调用)"""
-        self._on_result = callback
+        """注册结果回调 (指令执行完成时调用，支持多次注册)"""
+        self._on_result_callbacks.append(callback)
 
     def on_error(self, callback: Callable[[str], None]) -> None:
-        """注册错误回调"""
-        self._on_error = callback
+        """注册错误回调 (支持多次注册)"""
+        self._on_error_callbacks.append(callback)
 
     # ==================================================================
     # 公开 API: 工作模式
@@ -252,8 +309,14 @@ class VoiceRouterPipeline:
 
         # 1. ASR 识别
         if text is None and audio_data is not None:
-            asr_result = self._asr.transcribe(audio_data)
-            text = asr_result.text
+            if self._scheduler is not None:
+                text = self._scheduler.transcribe(audio_data)
+            else:
+                self._ensure_asr()
+                asr_result = self._asr.transcribe(audio_data)
+                text = asr_result.text
+                if self._config.asr_unload_after_use:
+                    self._asr.unload()
             logger.info("ASR 识别结果: '%s'", text)
 
         if not text or not text.strip():
@@ -292,9 +355,9 @@ class VoiceRouterPipeline:
         }
 
         # 6. 回调通知
-        if self._on_result:
+        for cb in self._on_result_callbacks:
             try:
-                self._on_result(result)
+                cb(result)
             except Exception as e:
                 logger.error("结果回调异常: %s", e)
 
@@ -350,44 +413,117 @@ class VoiceRouterPipeline:
 
     def _listening_loop(self) -> None:
         """后台监听主循环"""
-        has_wake_word = self._kws is not None
-        skip_kws = self._config.wake_word_threshold < 0  # 跳过唤醒词
+        use_kws = (
+            self._config.enable_kws
+            and self._config.wake_word_threshold >= 0
+        )
+        silence_timeout = self._config.audio.vad_silence_duration_ms / 1000.0
+
+        if use_kws:
+            self._set_state(PipelineState.LISTENING)
+            logger.info("持续监听: KWS 唤醒模式")
+        else:
+            logger.info("持续监听: VAD 直通模式 (KWS 已禁用)")
 
         while self._running:
             try:
-                # 读取音频块
                 chunk = self._capture.read()
-
-                # 降噪预处理
                 clean_chunk = self._preprocessor.process(chunk)
 
-                # VAD 检测
-                is_speech, speech_ended = self._vad.process_frame(clean_chunk)
-
-                current_state = self._get_state()
-
-                if current_state == PipelineState.IDLE:
-                    if is_speech:
-                        # 检测到语音，进入监听
-                        self._set_state(PipelineState.LISTENING)
-                        self._utterance_buffer = []
-
-                elif current_state == PipelineState.LISTENING:
-                    self._utterance_buffer.append(clean_chunk)
-
-                    if speech_ended:
-                        # 语音段结束，开始处理
-                        self._process_utterance_buffer()
-
-                    elif self._utterance_duration() > self._max_utterance_duration_sec:
-                        # 超时，强制处理
-                        self._process_utterance_buffer()
+                if use_kws:
+                    self._kws_listening_step(clean_chunk, silence_timeout)
+                else:
+                    self._vad_listening_step(clean_chunk, silence_timeout)
 
             except Exception as e:
                 logger.error("监听循环异常: %s", e)
-                if self._on_error:
-                    self._on_error(str(e))
+                for cb in self._on_error_callbacks:
+                    try:
+                        cb(str(e))
+                    except Exception:
+                        pass
                 time.sleep(0.1)
+
+    def _kws_listening_step(self, clean_chunk: np.ndarray,
+                            silence_timeout: float) -> None:
+        """KWS 唤醒 → 录音 → ASR 流程。"""
+        state = self._get_state()
+        now = time.time()
+        sample_rate = self._config.audio.sample_rate
+
+        kws = self._scheduler.kws if self._scheduler else self._kws
+        if kws is None:
+            return
+
+        if state in (PipelineState.IDLE, PipelineState.LISTENING):
+            self._set_state(PipelineState.LISTENING)
+            kws_result = kws.detect(clean_chunk)
+            if kws_result.detected and now > self._wake_cooldown_until:
+                self._wake_cooldown_until = now + self._wake_cooldown_sec
+                kws.reset()
+                self._utterance_buffer = [clean_chunk.copy()]
+                self._last_speech_time = now
+                self._silence_start = 0.0
+                self._skip_frames_until = now + 0.2
+                self._set_state(PipelineState.RECORDING)
+                for cb in self._on_wake_callbacks:
+                    try:
+                        cb(kws_result)
+                    except Exception as exc:
+                        logger.error("唤醒回调异常: %s", exc)
+                logger.info("唤醒词 '%s' 已检测，开始录音", kws_result.keyword)
+
+        elif state == PipelineState.RECORDING:
+            if now < self._skip_frames_until:
+                return
+
+            self._utterance_buffer.append(clean_chunk)
+            energy = float(np.sqrt(np.mean(clean_chunk ** 2)))
+            if energy > self._speech_threshold:
+                self._last_speech_time = now
+                self._silence_start = 0.0
+            elif self._silence_start == 0.0:
+                self._silence_start = now
+
+            total_dur = self._utterance_duration()
+            silence_dur = now - self._silence_start if self._silence_start > 0 else 0.0
+
+            if (
+                (silence_dur > silence_timeout and self._last_speech_time > 0)
+                or total_dur > self._max_utterance_duration_sec
+            ):
+                self._process_utterance_buffer()
+                kws_after = self._scheduler.kws if self._scheduler else self._kws
+                if kws_after:
+                    kws_after.reset()
+                self._set_state(PipelineState.LISTENING)
+
+    def _vad_listening_step(self, clean_chunk: np.ndarray,
+                            silence_timeout: float) -> None:
+        """无 KWS 时的 VAD 直通流程。"""
+        if self._vad is None:
+            is_speech, speech_ended = True, False
+        else:
+            is_speech, speech_ended = self._vad.process_frame(clean_chunk)
+
+        current_state = self._get_state()
+
+        if current_state == PipelineState.IDLE:
+            if is_speech:
+                self._set_state(PipelineState.LISTENING)
+                self._utterance_buffer = []
+
+        elif current_state == PipelineState.LISTENING:
+            self._utterance_buffer.append(clean_chunk)
+
+            if speech_ended:
+                self._process_utterance_buffer()
+            elif self._utterance_duration() > self._max_utterance_duration_sec:
+                self._process_utterance_buffer()
+
+    def _ensure_asr(self) -> None:
+        if self._asr is not None:
+            self._asr.ensure_loaded()
 
     def _process_utterance_buffer(self) -> None:
         """处理录音缓冲"""
@@ -426,22 +562,59 @@ class VoiceRouterPipeline:
         return total_samples / self._config.audio.sample_rate
 
     def _log_memory_estimate(self) -> None:
-        """估算内存占用"""
+        """估算内存占用，并同步到监控面板。
+
+        仅计算离线引擎核心模块（KWS/ASR/NLU模型 + 音频缓冲），
+        不包含 Python 解释器、系统库等与路由器部署无关的开销。
+        """
         perf = self._config.performance
-        total = (
-            perf.kws_model_memory_mb
-            + perf.asr_model_memory_mb
-            + perf.nlu_model_memory_mb
-            + perf.audio_buffer_memory_mb
+        if self._config.model_serial_exclusive:
+            standby = (
+                perf.kws_model_memory_mb
+                + perf.nlu_model_memory_mb
+            )
+            peak = (
+                perf.asr_model_memory_mb
+                + perf.nlu_model_memory_mb
+                + perf.audio_buffer_memory_mb
+            )
+            logger.info(
+                "内存估算(互斥): 待机 KWS+NLU=%dMB | 峰值 ASR+NLU+Buf=%dMB",
+                standby,
+                peak,
+            )
+            total = peak
+        else:
+            total = (
+                perf.kws_model_memory_mb
+                + perf.asr_model_memory_mb
+                + perf.nlu_model_memory_mb
+                + perf.audio_buffer_memory_mb
+            )
+            logger.info(
+                "内存估算: KWS=%dMB + ASR=%dMB + NLU=%dMB + Buffer=%dMB = %dMB (峰值引擎)",
+                perf.kws_model_memory_mb,
+                perf.asr_model_memory_mb,
+                perf.nlu_model_memory_mb,
+                perf.audio_buffer_memory_mb,
+                total,
+            )
+        logger.info(
+            "设备预算: 系统~%dMB + 峰值引擎~%dMB ≈ %dMB / %dMB",
+            perf.system_reserved_memory_mb,
+            total,
+            perf.system_reserved_memory_mb + total,
+            perf.device_total_memory_mb,
         )
-        logger.info("内存估算: KWS=%dMB + ASR=%dMB + NLU=%dMB + Buffer=%dMB = %dMB",
-                     perf.kws_model_memory_mb,
-                     perf.asr_model_memory_mb,
-                     perf.nlu_model_memory_mb,
-                     perf.audio_buffer_memory_mb,
-                     total)
         logger.info("性能目标: KWS<%dms, ASR<%dms, NLU<%dms, 端到端<%dms",
                      perf.kws_latency_ms,
                      perf.asr_latency_ms,
                      perf.nlu_latency_ms,
                      perf.total_latency_ms)
+
+        # 同步引擎内存估算到监控面板（仅离线引擎核心模块）
+        try:
+            from voice_router_lite.web.monitor import get_monitor
+            get_monitor().update_engine_memory(float(total))
+        except Exception:
+            pass

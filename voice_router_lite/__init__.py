@@ -12,16 +12,16 @@ Voice Router Lite - 离线语音控制引擎
 - Device: 设备控制 (GPIO/Relay/Fan/LED)
 
 使用方法:
-    from voice_router_lite import VoiceRouterPipeline
+    from voice_router_lite import VoiceRouterPipeline, PipelineConfig
 
-    pipeline = VoiceRouterPipeline(config_path="config.yaml")
+    pipeline = VoiceRouterPipeline(PipelineConfig())
     pipeline.initialize()
     pipeline.start()
     # ... 语音交互 ...
     pipeline.stop()
 """
 
-from voice_router_lite.config import PipelineConfig, ModelPaths, AudioConfig
+from voice_router_lite.config import PipelineConfig, ModelPaths, AudioConfig, router_default_config
 from voice_router_lite.pipeline import VoiceRouterPipeline
 
 __version__ = "0.1.0"
@@ -30,4 +30,5 @@ __all__ = [
     "PipelineConfig",
     "ModelPaths",
     "AudioConfig",
+    "router_default_config",
 ]

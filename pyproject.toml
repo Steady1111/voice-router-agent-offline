@@ -38,6 +38,13 @@ denoise = [
     "webrtcvad>=2.0",
 ]
 
+# Web 调试看板
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "psutil>=5.8",
+]
+
 # 设备控制 (GPIO)
 gpio = [
     "RPi.GPIO>=0.7",
@@ -51,6 +58,9 @@ all = [
     "onnxruntime>=1.14",
     "scipy>=1.7",
     "webrtcvad>=2.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "psutil>=5.8",
 ]
 
 # 开发工具
@@ -62,6 +72,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["voice_router_lite*"]
+
+[tool.setuptools.package-data]
+voice_router_lite = ["web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

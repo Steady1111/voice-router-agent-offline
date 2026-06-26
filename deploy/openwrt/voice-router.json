@@ -1,0 +1,26 @@
+{
+  "deployment_mode": "router",
+  "model_serial_exclusive": true,
+  "asr_subprocess": true,
+  "prefer_int8_nlu": true,
+  "asr_lazy_load": true,
+  "asr_unload_after_use": true,
+  "asr_num_threads": 1,
+  "enable_cgroups": true,
+  "cgroup_cpu_quota_pct": 30,
+  "cgroup_memory_mb": 80,
+  "use_openwrt_ubus": true,
+  "enable_kws": true,
+  "enable_tts_feedback": true,
+  "wake_word": "小T小T",
+  "wake_word_threshold": 0.7,
+  "nlu_confidence_threshold": 0.5,
+  "audio": {
+    "sample_rate": 16000,
+    "buffer_duration_sec": 2.0,
+    "input_device": null
+  },
+  "models": {
+    "base_dir": "/opt/voice_router/models"
+  }
+}

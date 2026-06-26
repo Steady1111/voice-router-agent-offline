@@ -14,18 +14,19 @@ Voice Router Lite 是一个**完全离线**的语音控制引擎，专为资源�
 | 功能 | 描述 | 模型 | 延迟 |
 |------|------|------|------|
 | **语音唤醒 (KWS)** | 自定义唤醒词检测 | sherpa-onnx KWS (3.3MB) | < 200ms |
-| **语音识别 (ASR)** | 中文流式/离线识别 | sherpa-onnx Zipformer (25MB) | < 1.5s |
-| **指令理解 (NLU)** | 意图分类 + 槽位提取 | CNN+LSTM (2MB) | < 100ms |
+| **语音识别 (ASR)** | 中文流式识别 | sherpa-onnx Zipformer zh 14M (25MB) | < 1.5s |
+| **指令理解 (NLU)** | 意图分类 + 槽位提取 | CNN+LSTM (11MB fp32) | < 100ms |
 | **语音合成 (TTS)** | 预录制音频拼接 | 无运行时内存 | < 300ms |
 | **降噪处理** | 频谱门降噪 + 回声消除 | 无模型 | < 5ms/帧 |
 | **设备控制** | GPIO/Relay/Fan/LED | - | - |
 
 ### 性能指标
 
-- **总内存**: < 50MB（含模型和运行时）
-- **模型体积**: < 35MB
+- **峰值引擎内存**: ~48MB（KWS 8 + ASR 25 + NLU 11 + 缓冲 5）
+- **待机内存**: ~76MB（含系统 ~60MB）
+- **模型磁盘体积**: ~41MB（ASR 25 + KWS 5 + NLU 11）
 - **端到端延迟**: < 2.0s
-- **离线运行**: 零网络依赖
+- **离线运行**: 零网络依赖（预研阶段 ESP32 经 WiFi 传 PCM）
 
 ## 架构
 
@@ -196,8 +197,8 @@ pytest tests/ -v
 
 | 组件 | 方案 | 模型大小 | 选型理由 |
 |------|------|---------|---------|
-| ASR | sherpa-onnx Zipformer | 25MB | 唯一在50MB内可运行的中文 ASR |
-| NLU | CNN+LSTM | 2MB | 平衡准确率与体积 |
+| ASR | sherpa-onnx Zipformer zh 14M | 25MB | 128MB 路由器可承载 |
+| NLU | CNN+LSTM | 11MB (fp32) | 准确率与体积平衡 |
 | KWS | sherpa-onnx KWS | 3.3MB | 支持自定义唤醒词微调 |
 | TTS | 预录制拼接 | 0MB | 零运行时内存 |
 | 降噪 | 频谱门 | 0MB | CPU 轻量，延迟 < 5ms |
@@ -205,17 +206,18 @@ pytest tests/ -v
 ## 部署到路由器
 
 ```bash
-# 1. 在开发机上训练/准备模型
-python -m voice_router_lite.tools.prepare_models
+# 1. 下载/训练模型（含 NLU INT8）
+bash download_models.sh
+python3 -m voice_router_lite.nlu.train_nlu
 
-# 2. 打包传输
-scp -r voice_router_lite/ models/ audio_clips/ root@router:/opt/voice_router/
+# 2. 打包（见 deploy/openwrt/README.md）
+tar czf voice_router.tar.gz voice_router_lite/ models/ audio_clips/ deploy/
 
-# 3. 在路由器上运行
-ssh root@router
-cd /opt/voice_router
-python3 -m voice_router_lite
+# 3. 路由器上运行守护进程（ALSA 直连，无 WebSocket）
+python3 -m voice_router_lite router --config deploy/openwrt/voice-router.json
 ```
+
+预研阶段仍用 `python3 -m voice_router_lite web` + ESP32。
 
 ## License
 

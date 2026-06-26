@@ -32,8 +32,10 @@ class NLUEngine:
         result = engine.understand(text)
     """
 
-    def __init__(self, model_paths: ModelPaths):
+    def __init__(self, model_paths: ModelPaths,
+                 confidence_threshold: float = 0.5):
         self._model_paths = model_paths
+        self._confidence_threshold = confidence_threshold
         self._model = CNNLSTMNLU()
         self._initialized: bool = False
 
@@ -47,25 +49,29 @@ class NLUEngine:
     # 公开 API
     # ------------------------------------------------------------------
 
-    def initialize(self) -> bool:
+    def initialize(self, prefer_int8: bool = False) -> bool:
         """
         初始化 NLU 引擎。
 
         ONNX 模型不可用时自动回退到规则引擎模式。
 
+        Args:
+            prefer_int8: 路由器部署时优先 INT8 量化模型
+
         Returns:
             True 初始化成功
         """
+        model_path = self._model_paths.resolve_nlu_model(prefer_int8)
         try:
             ok = self._model.load_onnx(
-                model_path=self._model_paths.nlu_intent_model,
+                model_path=model_path,
                 vocab_path=self._model_paths.nlu_vocab,
                 intent_labels_path=self._model_paths.nlu_intent_labels,
                 slot_labels_path=self._model_paths.nlu_slot_labels,
             )
             # 即使 ONNX 加载失败，规则引擎也能工作
             self._initialized = True
-            logger.info("NLU 引擎已初始化: mode=%s", self._model._mode)
+            logger.info("NLU 引擎已初始化: mode=%s model=%s", self._model._mode, model_path)
             if not ok:
                 logger.info("NLU: ONNX 模型不可用，使用规则引擎兜底")
             return True
@@ -92,7 +98,23 @@ class NLUEngine:
         # 1. 模型推理
         result = self._model.predict(text)
 
-        # 2. 后处理
+        # 2. 低置信度回退规则引擎
+        if (
+            self._model._mode == "onnx"
+            and result.confidence < self._confidence_threshold
+        ):
+            rule_result = self._model._predict_rules(text)
+            if rule_result.is_valid and (
+                not result.is_valid or rule_result.confidence >= result.confidence
+            ):
+                logger.info(
+                    "NLU 低置信度 %.2f < %.2f，回退规则引擎",
+                    result.confidence,
+                    self._confidence_threshold,
+                )
+                result = rule_result
+
+        # 3. 后处理
         for processor in self._post_processors:
             result = processor(result)
 
@@ -135,19 +157,28 @@ class NLUEngine:
         intent = result.intent
         slots = result.slots
 
-        # 开关设备的默认状态
-        if intent == "set_device_state":
+        # 开关设备的默认状态 (V2: device_control，兼容 V1: set_device_state)
+        if intent in ("device_control", "set_device_state"):
             if "state" not in slots:
                 if any(w in result.text for w in ["开", "启动"]):
                     slots["state"] = "on"
                 elif any(w in result.text for w in ["关", "停止", "熄"]):
                     slots["state"] = "off"
+            # 标准化中文状态值 → 英文
+            elif slots.get("state") in ("打开", "开启", "开"):
+                slots["state"] = "on"
+            elif slots.get("state") in ("关闭", "关掉", "关", "熄"):
+                slots["state"] = "off"
 
-        # 调节类指令
-        if intent == "adjust_fan_speed":
+        # 调节类指令 (V2: device_adjust，兼容 V1: adjust_fan_speed)
+        if intent in ("device_adjust", "adjust_fan_speed"):
             if "speed_level" not in slots and "direction" in slots:
                 direction = slots["direction"]
-                # 根据方向推断步长
+                # 中文方向 → up/down
+                if any(w in direction for w in ["大", "高", "热", "快", "亮", "调大", "加大"]):
+                    direction = "up"
+                elif any(w in direction for w in ["小", "低", "冷", "慢", "暗", "调小", "减小"]):
+                    direction = "down"
                 slots["speed_delta"] = "1" if direction == "up" else "-1"
 
         return result

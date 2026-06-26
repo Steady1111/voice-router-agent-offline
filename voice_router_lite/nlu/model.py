@@ -4,11 +4,13 @@
 CNN+LSTM 架构用于意图分类和槽位提取。
 支持从 ONNX 模型文件加载进行推理。
 
+意图重心：路由器运维管理（10 个意图，~65%）+ 智能家居设备控制（6 个意图，~35%）
+
 性能指标:
-- 模型体积: 2MB
-- 推理内存: 3MB
+- 模型体积: ~10MB (fp32) / ~2-3MB (量化目标)
+- 推理内存: 3-5MB
 - 推理延迟: < 100ms
-- 准确率: > 90% (10类意图)
+- 意图数: 16（路由器10 + 智能家居6）
 """
 
 import json
@@ -188,13 +190,21 @@ class CNNLSTMNLU:
 
     def _predict_onnx(self, text: str) -> NLUResult:
         try:
-            input_ids = self._tokenize(text)
-            input_ids = np.array([input_ids], dtype=np.int64)
-
-            outputs = self._onnx_session.run(
-                None,
-                {"input_ids": input_ids}
+            token_ids = self._tokenize(text)
+            input_ids = np.array([token_ids], dtype=np.int64)
+            # attention_mask: 1 for real tokens, 0 for padding
+            attention_mask = np.array(
+                [[1 if t != self.vocab.get("<PAD>", 0) else 0 for t in token_ids]],
+                dtype=np.int64,
             )
+
+            # 动态检测 ONNX 模型输入名称
+            onnx_inputs = [inp.name for inp in self._onnx_session.get_inputs()]
+            feed_dict = {"input_ids": input_ids}
+            if "attention_mask" in onnx_inputs:
+                feed_dict["attention_mask"] = attention_mask
+
+            outputs = self._onnx_session.run(None, feed_dict)
 
             intent_logits = outputs[0]  # [1, num_intents]
             slot_logits = outputs[1] if len(outputs) > 1 else None  # [1, seq_len, num_slots]
@@ -272,31 +282,54 @@ class CNNLSTMNLU:
                 self.intent_labels = {int(k): v for k, v in raw.items()}
         except Exception:
             self.intent_labels = {
-                0: "set_device_state",
-                1: "adjust_fan_speed",
-                2: "set_light_brightness",
-                3: "query_device_status",
-                4: "timer_setting",
-                5: "scene_mode",
-                6: "router_reboot",
-                7: "router_wifi_restart",
-                8: "control_ac",
-                9: "help",
+                0: "router_reboot", 1: "router_wifi_restart", 2: "router_wifi_config",
+                3: "router_network_query", 4: "router_led_control", 5: "router_device_manage",
+                6: "router_network_diag", 7: "router_system", 8: "router_qos", 9: "router_security",
+                10: "device_control", 11: "device_adjust", 12: "device_query",
+                13: "timer_setting", 14: "scene_mode", 15: "help",
             }
         return True
 
-    # 意图关键词映射
+    # 意图关键词映射（使用长度加权评分，更长的匹配更精确）
     INTENT_KEYWORDS = {
-        "set_device_state": ["打开", "关闭", "开", "关", "启动", "停止"],
-        "adjust_fan_speed": ["调大", "调小", "风度", "风速", "大一点", "小一点"],
-        "set_light_brightness": ["亮度", "亮一点", "暗一点", "调亮", "调暗"],
-        "query_device_status": ["多少", "怎么样", "状态", "开着吗", "关了"],
-        "timer_setting": ["定时", "分钟后", "小时后", "延迟"],
-        "scene_mode": ["睡眠", "工作", "离开", "回家", "模式"],
-        "router_reboot": ["重启路由", "重启网络", "网络卡"],
-        "router_wifi_restart": ["重启WIFI", "WIFI断了", "重启wifi"],
-        "control_ac": ["空调", "温度", "制冷", "制热", "调温"],
-        "help": ["帮助", "能做什么", "功能", "怎么用"],
+        # 🔵 路由器核心
+        "router_reboot": ["重启路由", "重启网络", "网络卡", "网卡了", "路由器重启", "死机了",
+                          "网络重启", "重启一下网络", "重新启动路由", "重启一下", "没响应了"],
+        "router_wifi_restart": ["重启WIFI", "WIFI断了", "重启wifi", "WIFI重启", "Wi-Fi重启",
+                                "无线重启", "WiFi连不上", "无线断了", "WiFi重开", "重新打开WiFi",
+                                "关闭WiFi", "打开WiFi"],
+        "router_wifi_config": ["改WiFi密码", "WiFi密码", "WiFi改个名字", "WiFi改名字",
+                               "改个密码", "修改密码", "WiFi改名", "无线密码",
+                               "访客WiFi", "访客网络", "打开访客", "关闭访客",
+                               "WiFi名字", "设置WiFi", "WiFi设置", "5G频段", "2.4G频段",
+                               "WiFi信道", "WiFi模式", "SSID改"],
+        "router_network_query": ["IP地址", "IP是多少", "谁连了", "连了几个", "网速",
+                                 "我的IP", "路由器IP", "连接设备", "设备列表",
+                                 "网速怎么样", "运行多久", "温度多少", "内存剩多少",
+                                 "CPU负载", "联网设备", "宽带速度"],
+        "router_led_control": ["路由器灯", "路由器的灯", "路由器LED", "路由器的LED",
+                               "指示灯", "LED灯", "熄灭", "点亮"],
+        "router_device_manage": ["踢掉", "拉黑", "屏蔽", "禁止上网", "取消拉黑",
+                                 "解除屏蔽", "恢复上网", "允许联网", "黑名单", "屏蔽列表"],
+        "router_network_diag": ["测速", "测一下网速", "网络测速", "延迟多少", "Ping一下",
+                                "延迟怎么样", "丢包率", "检查丢包", "DNS正常", "DNS解析",
+                                "网络诊断", "全面诊断", "一键诊断"],
+        "router_system": ["固件更新", "有新固件", "固件升级", "更新系统", "备份配置",
+                          "备份设置", "导出配置", "恢复出厂", "恢复默认设置", "重置路由器",
+                          "系统日志", "定时重启", "凌晨重启"],
+        "router_qos": ["限速", "限制网速", "限制带宽", "优先", "提速", "更高的优先级",
+                       "QoS", "带宽管理", "流量控制", "50兆", "100兆", "10兆", "20兆"],
+        "router_security": ["防火墙", "安全防护", "打开VPN", "关闭VPN", "VPN服务",
+                            "家长控制", "上网时间管理", "儿童模式", "青少年模式",
+                            "防蹭网", "局域网安全", "安全日志", "攻击记录"],
+        # 🏠 智能家居扩展
+        "device_control": ["打开", "关闭", "启动", "停止", "关掉", "开一下", "关一下"],
+        "device_adjust": ["调大", "调小", "风速", "大一点", "小一点", "亮度", "亮一点",
+                          "暗一点", "调亮", "调暗", "温度调高", "温度调低"],
+        "device_query": ["开着吗", "关了吗", "状态怎么样", "的状态", "查看一下"],
+        "timer_setting": ["定时", "分钟后", "小时后", "延迟", "分钟关闭", "分钟打开"],
+        "scene_mode": ["睡眠", "工作", "离开", "回家", "节能", "模式"],
+        "help": ["帮助", "能做什么", "功能", "怎么用", "功能列表"],
     }
 
     # 槽位关键词
@@ -314,12 +347,13 @@ class CNNLSTMNLU:
         """规则引擎兜底推理"""
         text_lower = text.lower()
 
-        # 1. 意图匹配
+        # 1. 意图匹配（使用关键词长度加权评分）
         best_intent = "unknown"
         best_score = 0
 
         for intent, keywords in self.INTENT_KEYWORDS.items():
-            score = sum(1 for kw in keywords if kw.lower() in text_lower)
+            # 按关键词长度加权：更长的匹配更精确
+            score = sum(len(kw) for kw in keywords if kw.lower() in text_lower)
             if score > best_score:
                 best_score = score
                 best_intent = intent
@@ -327,7 +361,7 @@ class CNNLSTMNLU:
         # 2. 槽位提取
         slots = self._extract_rules_slots(text)
 
-        confidence = min(best_score / 3.0, 1.0) if best_score > 0 else 0.0
+        confidence = min(best_score / 10.0, 1.0) if best_score > 0 else 0.0
 
         return NLUResult(
             text=text,
@@ -339,9 +373,10 @@ class CNNLSTMNLU:
         )
 
     def _extract_rules_slots(self, text: str) -> Dict[str, str]:
-        """基于规则的槽位提取"""
+        """基于规则的槽位提取（ONNX 模型推理的兜底）"""
         slots = {}
         text_lower = text.lower()
+        import re
 
         # 设备类型
         for dev, kws in {"fan": ["风扇"], "light": ["灯"], "led": ["led"],
@@ -351,9 +386,9 @@ class CNNLSTMNLU:
                 break
 
         # 状态
-        if any(w in text for w in ["打开", "开启", "启动"]):
+        if any(w in text for w in ["打开", "开启", "启动", "启用"]):
             slots["state"] = "on"
-        elif any(w in text for w in ["关闭", "停止", "熄"]):
+        elif any(w in text for w in ["关闭", "关掉", "关了", "停止", "熄", "禁用"]):
             slots["state"] = "off"
 
         # 调节方向（暗/小/低优先于 亮/大/高 判断）
@@ -362,12 +397,105 @@ class CNNLSTMNLU:
         elif any(w in text for w in ["亮一点", "亮些", "亮", "大", "高", "热", "快"]):
             slots["direction"] = "up"
 
+        # 定时时长: "[数字][分钟/小时/秒]后"
+        duration_match = re.search(
+            r'(\d+)\s*(分钟|小时|秒|minute|hour|second|min|h|s)', text
+        )
+        if duration_match:
+            slots["timer_duration"] = duration_match.group(0).replace(" ", "")
+
         # 场景模式
-        modes = ["睡眠", "工作", "离开", "回家"]
+        modes = ["睡眠", "工作", "离开", "回家", "节能"]
         for mode in modes:
             if mode in text:
                 slots["mode_name"] = mode
                 break
+
+        # 🔵 路由器查询类型
+        if any(w in text for w in ["IP地址", "IP是多少", "IP", "地址"]):
+            slots["query_type"] = "ip"
+        elif any(w in text for w in ["谁连了", "连了几个", "连接设备", "设备列表", "多少设备",
+                                      "联网设备", "连接的设备"]):
+            slots["query_type"] = "devices"
+        elif any(w in text for w in ["网速", "测速", "速度", "宽带"]):
+            slots["query_type"] = "speed"
+        elif any(w in text for w in ["运行多久", "温度", "内存", "CPU负载"]):
+            slots["query_type"] = "system_status"
+
+        # 🔵 WiFi 配置类型
+        if any(w in text for w in ["密码", "password"]):
+            slots["config_type"] = "password"
+        elif any(w in text for w in ["名字", "名称", "SSID"]):
+            slots["config_type"] = "ssid"
+        elif any(w in text for w in ["访客", "guest"]):
+            slots["config_type"] = "guest"
+        elif any(w in text for w in ["5G", "5G频段"]):
+            slots["config_type"] = "5g_band"
+        elif any(w in text for w in ["2.4G", "2.4G频段"]):
+            slots["config_type"] = "2.4g_band"
+        elif any(w in text for w in ["信道", "channel"]):
+            slots["config_type"] = "channel"
+        elif any(w in text for w in ["模式"]):
+            slots["config_type"] = "mode"
+
+        # 🔵 设备管理动作
+        if any(w in text for w in ["踢掉", "踢"]):
+            slots["manage_action"] = "kick"
+        elif any(w in text for w in ["拉黑", "屏蔽", "禁止上网"]):
+            slots["manage_action"] = "block"
+        elif any(w in text for w in ["取消拉黑", "解除屏蔽", "恢复上网", "允许联网"]):
+            slots["manage_action"] = "unblock"
+        elif any(w in text for w in ["限速"]):
+            slots["manage_action"] = "limit_speed"
+        elif any(w in text for w in ["查看", "列出", "显示"]) and any(w in text for w in ["黑名单", "屏蔽列表", "已拉黑"]):
+            slots["manage_action"] = "list_blocked"
+
+        # 🔵 网络诊断类型
+        if any(w in text for w in ["诊断", "全面诊断", "一键诊断"]):
+            slots["diag_type"] = "full_diag"
+        elif any(w in text for w in ["测速"]):
+            slots["diag_type"] = "speed_test"
+        elif any(w in text for w in ["延迟", "Ping", "ping"]):
+            slots["diag_type"] = "latency"
+        elif any(w in text for w in ["丢包"]):
+            slots["diag_type"] = "packet_loss"
+        elif any(w in text for w in ["DNS", "dns"]):
+            slots["diag_type"] = "dns"
+
+        # 🔵 系统运维动作
+        if any(w in text for w in ["固件更新", "有新固件", "固件升级", "更新系统"]):
+            slots["sys_action"] = "firmware_update"
+        elif any(w in text for w in ["备份配置", "备份设置", "导出配置", "保存配置"]):
+            slots["sys_action"] = "backup"
+        elif any(w in text for w in ["恢复出厂", "恢复默认设置", "重置路由器", "恢复出厂设置"]):
+            slots["sys_action"] = "factory_reset"
+        elif any(w in text for w in ["系统日志", "异常"]):
+            slots["sys_action"] = "view_logs"
+        elif any(w in text for w in ["定时重启", "凌晨重启"]):
+            slots["sys_action"] = "scheduled_reboot"
+
+        # 🔵 QoS 动作
+        if any(w in text for w in ["优先", "提速"]):
+            slots["qos_action"] = "prioritize"
+        elif any(w in text for w in ["限速", "限制"]):
+            slots["qos_action"] = "limit"
+
+        # 🔵 带宽值提取
+        bw_match = re.search(r'(\d+)\s*[兆M]', text)
+        if bw_match:
+            slots["bandwidth_value"] = bw_match.group(0).replace(" ", "")
+
+        # 🔵 安全策略类型
+        if any(w in text for w in ["防火墙", "安全防护"]):
+            slots["security_type"] = "firewall"
+        elif any(w in text for w in ["VPN", "vpn"]):
+            slots["security_type"] = "vpn"
+        elif any(w in text for w in ["家长控制", "上网时间管理", "儿童模式", "青少年模式"]):
+            slots["security_type"] = "parental_control"
+        elif any(w in text for w in ["防蹭网", "局域网安全"]):
+            slots["security_type"] = "lan_security"
+        elif any(w in text for w in ["安全日志", "攻击记录"]):
+            slots["security_type"] = "security_logs"
 
         return slots
 

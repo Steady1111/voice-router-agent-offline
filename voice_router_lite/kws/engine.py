@@ -53,9 +53,11 @@ class KWSEngine:
         engine.start_listening()
     """
 
-    def __init__(self, model_paths: ModelPaths, audio_config: AudioConfig):
+    def __init__(self, model_paths: ModelPaths, audio_config: AudioConfig,
+                 wake_word_threshold: float = 0.7):
         self._model_paths = model_paths
         self._audio_config = audio_config
+        self._wake_word_threshold = wake_word_threshold
 
         # sherpa-onnx 引擎
         self._sherpa_kws = None
@@ -66,9 +68,14 @@ class KWSEngine:
         self._listening: bool = False
         self._listening_thread: Optional[threading.Thread] = None
 
-        # 音频缓冲
-        self._audio_buffer = np.array([], dtype=np.float32)
-        self._buffer_duration_ms: int = 1500  # 1.5秒检测窗口
+        # KWS 流式检测（持久化 stream，持续喂入音频）
+        self._kws_stream = None  # sherpa-onnx stream，初始化后创建
+        self._stream_frame_count: int = 0  # 已喂入 stream 的帧数
+        self._stream_tail_pending: bool = False  # 是否已喂入 tail paddings
+
+        # 调试日志控制
+        self._debug_log_interval: int = 30  # 每30帧输出一次 debug 日志
+        self._verbose_frames: int = 60  # 前N帧开启逐帧详细日志
 
         # 唤醒回调
         self._wake_callbacks: list[Callable[[KWSResult], None]] = []
@@ -93,22 +100,68 @@ class KWSEngine:
         """
         try:
             import sherpa_onnx
-
-            # 检查模型文件
             import os
-            if not os.path.exists(self._model_paths.kws_model):
-                logger.warning("KWS 模型文件不存在: %s", self._model_paths.kws_model)
-                raise FileNotFoundError(self._model_paths.kws_model)
+
+            # 检查必要模型文件
+            required = [
+                self._model_paths.kws_encoder,
+                self._model_paths.kws_decoder,
+                self._model_paths.kws_joiner,
+                self._model_paths.kws_tokens,
+            ]
+            missing = [f for f in required if not os.path.exists(f)]
+            if missing:
+                raise FileNotFoundError(f"缺少 KWS 模型文件: {missing}")
+
+            # 关键词配置文件 (可选)
+            keywords_file = self._model_paths.kws_keywords
+            if not os.path.exists(keywords_file):
+                keywords_file = ""
+
+            # 新版 sherpa_onnx API: 直接传参构造 KeywordSpotter
+            # sherpa keywords_threshold: 越高越难触发；官方默认 0.25
+            env_thresh = os.getenv("VOICE_ROUTER_KWS_THRESHOLD")
+            if env_thresh:
+                keywords_threshold = max(0.05, min(0.5, float(env_thresh)))
+            else:
+                keywords_threshold = max(0.05, min(0.35, self._wake_word_threshold * 0.25))
 
             self._sherpa_kws = sherpa_onnx.KeywordSpotter(
-                model=self._model_paths.kws_model,
                 tokens=self._model_paths.kws_tokens,
+                encoder=self._model_paths.kws_encoder,
+                decoder=self._model_paths.kws_decoder,
+                joiner=self._model_paths.kws_joiner,
+                keywords_file=keywords_file if keywords_file else "",
                 num_threads=1,
                 sample_rate=self._audio_config.sample_rate,
+                max_active_paths=8,
+                keywords_score=3.0,
+                keywords_threshold=keywords_threshold,
+                num_trailing_blanks=4,
             )
             self._mode = "sherpa"
             self._initialized = True
-            logger.info("KWS 引擎已初始化: 模式=sherpa-onnx")
+
+            # 创建持久化 stream，持续喂入音频（流式模式）
+            self._kws_stream = self._sherpa_kws.create_stream()
+            self._stream_frame_count = 0
+            self._stream_tail_pending = False
+
+            # 打印关键词列表
+            if keywords_file:
+                try:
+                    with open(keywords_file, "r") as f:
+                        kw_lines = [l.strip() for l in f if l.strip()]
+                    logger.info("KWS 关键词文件: %s (%d条)", keywords_file, len(kw_lines))
+                    for kw in kw_lines[:3]:
+                        logger.info("  → %s", kw)
+                except Exception:
+                    pass
+
+            logger.info(
+                "KWS 引擎已初始化: 模式=sherpa-onnx (threshold=%.2f)",
+                keywords_threshold,
+            )
             return True
 
         except (ImportError, FileNotFoundError, Exception) as e:
@@ -129,17 +182,6 @@ class KWSEngine:
         """
         if not self._initialized:
             return KWSResult(detected=False)
-
-        # 加入缓冲
-        with self._lock:
-            self._audio_buffer = np.concatenate([self._audio_buffer, audio_chunk])
-
-            # 保持缓冲窗口长度
-            max_samples = int(
-                self._audio_config.sample_rate * self._buffer_duration_ms / 1000
-            )
-            if len(self._audio_buffer) > max_samples:
-                self._audio_buffer = self._audio_buffer[-max_samples:]
 
         if self._mode == "sherpa":
             return self._sherpa_detect(audio_chunk)
@@ -183,14 +225,16 @@ class KWSEngine:
         self._wake_callbacks.append(callback)
 
     def reset(self) -> None:
-        """重置引擎状态"""
-        with self._lock:
-            self._audio_buffer = np.array([], dtype=np.float32)
-            self._energy_spike_count = 0
+        """重置引擎状态（清空 KWS stream，防止旧音频干扰）"""
+        if self._mode == "sherpa" and self._sherpa_kws and self._kws_stream:
+            self._sherpa_kws.reset_stream(self._kws_stream)
+            self._stream_frame_count = 0
+        self._energy_spike_count = 0
 
     def close(self) -> None:
         """释放资源"""
         self.stop_listening()
+        self._kws_stream = None
         self._sherpa_kws = None
         self._initialized = False
 
@@ -203,32 +247,81 @@ class KWSEngine:
     # ------------------------------------------------------------------
 
     def _sherpa_detect(self, audio_chunk: np.ndarray) -> KWSResult:
-        """sherpa-onnx KWS 检测"""
+        """
+        sherpa-onnx KWS 检测 (流式持久 stream 模式)。
+
+        持续向同一个 stream 喂入音频帧，调用 decode 检查是否有
+        关键词匹配。检测到关键词后自动 reset stream。
+
+        参照 sherpa-onnx 官方 keyword-spotter-from-microphone 示例。
+        """
         try:
-            # 确保 float32
             if audio_chunk.dtype != np.float32:
                 audio = audio_chunk.astype(np.float32)
             else:
                 audio = audio_chunk
 
-            self._sherpa_kws.accept_waveform(self._audio_config.sample_rate, audio)
+            # 喂入音频到持久化 stream
+            self._stream_frame_count += 1
+            fc = self._stream_frame_count
+            self._kws_stream.accept_waveform(
+                self._audio_config.sample_rate, audio
+            )
 
-            while self._sherpa_kws.is_ready():
-                self._sherpa_kws.decode()
+            # 解码并检查结果
+            result_text = ""
+            decode_count = 0
+            raw_results = []
+            while self._sherpa_kws.is_ready(self._kws_stream):
+                self._sherpa_kws.decode_stream(self._kws_stream)
+                decode_count += 1
+                r = self._sherpa_kws.get_result(self._kws_stream)
+                raw_results.append((type(r).__name__, repr(r)))
+                if r and isinstance(r, str) and r.strip():
+                    result_text = r.strip()
 
-            result_text = self._sherpa_kws.get_result()
-            if result_text and result_text.keyword:
-                kw_result = KWSResult(
+            # 前 N 帧逐帧详细日志
+            energy = float(np.sqrt(np.mean(audio ** 2)))
+            if fc <= self._verbose_frames:
+                raw_info = f"raw={raw_results}" if raw_results else ""
+                logger.info(
+                    "[KWS verbose] #%d samples=%d energy=%.5f C:%s O:%s NaN:%s ready=%s decodes=%d result=%s %s",
+                    fc, len(audio), energy,
+                    audio.flags['C_CONTIGUOUS'], audio.flags['OWNDATA'],
+                    bool(np.isnan(audio).any()),
+                    "YES" if decode_count > 0 else "NO",
+                    decode_count, repr(result_text), raw_info,
+                )
+            elif fc % self._debug_log_interval == 0:
+                logger.info(
+                    "[KWS debug] #%d energy=%.5f decodes=%d result=%s",
+                    fc, energy, decode_count, repr(result_text),
+                )
+            elif energy > 0.025 and fc % 15 == 0:
+                logger.info(
+                    "[KWS] 语音能量高但未命中: energy=%.4f decodes=%d",
+                    energy, decode_count,
+                )
+
+            if result_text:
+                # 检测到唤醒词 → reset stream，防止重复触发
+                self._sherpa_kws.reset_stream(self._kws_stream)
+                frame_num = self._stream_frame_count
+                self._stream_frame_count = 0
+                logger.info(
+                    "[KWS] 🎯 检测到唤醒词: '%s' (frame #%d)",
+                    result_text, frame_num,
+                )
+                confidence = min(1.0, max(0.5, 1.0 - self._wake_word_threshold * 0.3))
+                return KWSResult(
                     detected=True,
-                    keyword=result_text.keyword,
-                    confidence=getattr(result_text, "confidence", 0.8),
+                    keyword=result_text.strip(),
+                    confidence=confidence,
                     timestamp=time.time(),
                 )
-                self._notify_wake(kw_result)
-                return kw_result
 
         except Exception as e:
-            logger.debug("KWS 检测异常: %s", e)
+            logger.error("KWS 推理异常: %s", e, exc_info=True)
 
         return KWSResult(detected=False)
 

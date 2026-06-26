@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>voice-router-lite</title>
+  <link rel="stylesheet" href="/style.css?v=3" />
+</head>
+<body>
+  <!-- 顶部精简栏 -->
+  <header>
+    <h1>voice-router-lite</h1>
+    <div class="header-status">
+      <div class="status-item" id="net-status">
+        <span class="status-dot" id="net-dot"></span>
+        <span id="net-text">网络加载中…</span>
+      </div>
+      <div class="status-item" id="wake-status">
+        <span class="status-dot" id="wake-dot"></span>
+        <span id="wake-text">等待唤醒</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主布局：左栏(对话) + 右栏(状态) -->
+  <main>
+    <!-- 左栏：唤醒 + 对话 + 按钮 -->
+    <div class="main-col">
+      <!-- 唤醒状态卡片 -->
+      <div class="wake-card" id="wake-card">
+        <div class="wake-card-icon">🎤</div>
+        <div class="wake-card-text">
+          <div class="wake-card-label" id="wake-label">离线语音控制台</div>
+          <div class="wake-card-time" id="wake-time"></div>
+        </div>
+      </div>
+
+      <!-- 对话记录区域 -->
+      <div class="chat-panel" id="chat-panel">
+        <div class="chat-empty" id="chat-empty">输入或发送指令后，对话内容将显示在这里</div>
+        <div class="chat-list" id="chat-list"></div>
+      </div>
+
+      <!-- 说话按钮 -->
+      <button class="talk-btn" id="talk-btn">
+        <span class="talk-btn-icon">🎙️</span>
+        <span class="talk-btn-text">按住说话</span>
+      </button>
+
+      <!-- 文本调试 -->
+      <form id="text-form" class="debug-form">
+        <input id="text-input" placeholder="输入文字指令，如：打开风扇" autocomplete="off" />
+        <button type="submit">发送</button>
+      </form>
+
+      <audio id="tts-player" hidden preload="auto"></audio>
+    </div>
+
+    <!-- 右栏：设备 + 性能监控 -->
+    <div class="side-col">
+      <!-- 设备状态 -->
+      <section class="side-panel">
+        <h2>设备状态</h2>
+        <ul id="device-list" class="device-list"></ul>
+      </section>
+
+      <!-- 性能监控（可折叠） -->
+      <section class="side-panel collapsible" id="monitor-panel">
+        <h2 class="collapsible-header" id="monitor-toggle">
+          性能监控
+          <span class="collapse-arrow">▶</span>
+        </h2>
+        <div class="collapsible-body">
+          <div class="monitor-host" id="monitor-host">加载中…</div>
+          <div class="monitor-grid" id="monitor-grid">
+            <!-- 由 JS 动态填充 -->
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/app.js?v=5" type="module"></script>
+</body>
+</html>

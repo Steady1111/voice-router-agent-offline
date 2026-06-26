@@ -1,0 +1,26 @@
+// 把本文件复制为 config.h 后填入真实值。config.h 已被 gitignore，不会提交。
+#pragma once
+
+// WiFi
+#define WIFI_SSID        "your-ssid"
+#define WIFI_PASSWORD    "your-password"
+
+// 中枢服务（运行 server/main.py 的那台机器）
+#define HUB_HOST         "192.168.1.100"  // 中枢所在机器的局域网 IP
+#define HUB_PORT         28080
+#define HUB_WS_PATH      "/ws/audio"
+
+// 音频与 I2S 引脚
+#define SAMPLE_RATE_HZ   16000
+#define I2S_BCLK_PIN     4   // 位时钟 BCLK ← INMP441 SCK
+#define I2S_LRCLK_PIN    5   // 帧时钟 LRCLK/WS ← INMP441 WS
+#define I2S_DIN_PIN      6   // 数据输入 DIN ← INMP441 SD
+
+// 按键（内部上拉，按下为低电平）
+#define BUTTON_PIN       0
+
+// 板载 RGB 状态灯引脚（没有则设为 -1）
+#define STATUS_LED_PIN   48
+
+// 每帧 PCM 的采样点数（16kHz 下约 32ms）
+#define FRAME_SAMPLES    512

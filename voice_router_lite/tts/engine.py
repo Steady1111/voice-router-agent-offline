@@ -72,15 +72,18 @@ class TTSEngine:
     # 公开 API
     # ------------------------------------------------------------------
 
-    def initialize(self) -> bool:
+    def initialize(self, *, open_player: bool = True) -> bool:
         """
         初始化 TTS 引擎。
+
+        Args:
+            open_player: False 时不打开本机扬声器（Web 服务仅需合成音频）
 
         Returns:
             True 初始化成功
         """
-        # 打开播放器
-        self._player.open()
+        if open_player:
+            self._player.open()
 
         # 加载音频索引
         index_path = self._model_paths.tts_index
@@ -175,6 +178,37 @@ class TTSEngine:
     def beep_wake(self) -> None:
         """播放唤醒音"""
         self.speak("wake_beep", blocking=False)
+
+    @property
+    def sample_rate(self) -> int:
+        return self._audio_config.sample_rate
+
+    def render_tone(self, name: str) -> Optional[np.ndarray]:
+        """合成提示音（不播放）。"""
+        if name in self._builtin_tones:
+            return self._builtin_tones[name]()
+        clip = self._get_clip(name)
+        return clip.copy() if clip is not None else None
+
+    def render_sentence(self, text: str) -> Optional[np.ndarray]:
+        """拼接合成整句音频（不播放）。"""
+        clip_names = self._synthesize(text)
+        if not clip_names:
+            return None
+        gap = np.zeros(int(self.sample_rate * 0.08), dtype=np.int16)
+        parts: list[np.ndarray] = []
+        for name in clip_names:
+            audio = self._get_clip(name)
+            if audio is None and name in self._builtin_tones:
+                audio = self._builtin_tones[name]()
+            if audio is None:
+                continue
+            if parts:
+                parts.append(gap)
+            parts.append(np.asarray(audio, dtype=np.int16))
+        if not parts:
+            return None
+        return np.concatenate(parts)
 
     def close(self) -> None:
         """释放资源"""
@@ -277,15 +311,18 @@ class TTSEngine:
         device = device_name_map.get(slots.get("device_type", ""), "设备")
 
         feedback_map = {
-            "set_device_state": f"已{slots.get('state', '切换')}{device}",
-            "adjust_fan_speed": f"已调整风扇速度",
-            "set_light_brightness": f"已调整灯光亮度",
-            "query_device_status": f"{device}状态查询",
-            "timer_setting": f"定时已设置",
+            "device_control": f"已{slots.get('state', '切换')}{device}",
+            "device_adjust": "已调整风扇速度",
+            "device_query": f"{device}状态查询",
+            "timer_setting": "定时已设置",
             "scene_mode": f"已切换到{slots.get('mode_name', '')}模式",
+            "set_device_state": f"已{slots.get('state', '切换')}{device}",
+            "adjust_fan_speed": "已调整风扇速度",
+            "set_light_brightness": "已调整灯光亮度",
+            "query_device_status": f"{device}状态查询",
             "router_reboot": "正在重启路由器",
             "router_wifi_restart": "正在重启WiFi",
-            "control_ac": f"已调整空调设置",
+            "control_ac": "已调整空调设置",
             "help": "我可以控制风扇、灯光、LED等设备",
         }
 
@@ -326,3 +363,18 @@ class TTSEngine:
         t2 = TTSEngine._generate_tone(f2, d2)
         gap = np.zeros(1600, dtype=np.int16)  # 100ms 间隔
         return np.concatenate([t1, gap, t2])
+
+
+def pcm_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
+    """int16 PCM mono → WAV bytes (for browser playback)."""
+    import io
+    import wave
+
+    pcm = np.asarray(audio, dtype=np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+    return buf.getvalue()

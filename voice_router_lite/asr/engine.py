@@ -57,9 +57,11 @@ class ASREngine:
         result = engine.transcribe(audio_data)
     """
 
-    def __init__(self, model_paths: ModelPaths, audio_config: AudioConfig):
+    def __init__(self, model_paths: ModelPaths, audio_config: AudioConfig,
+                 num_threads: int = 2):
         self._model_paths = model_paths
         self._audio_config = audio_config
+        self._num_threads = num_threads
 
         # sherpa-onnx 引擎
         self._online_recognizer = None
@@ -84,38 +86,25 @@ class ASREngine:
     def initialize(self) -> bool:
         """
         初始化 ASR 引擎。
-
         Returns:
             True 初始化成功
         """
+        if self._online_recognizer is not None:
+            return True
+
         try:
             import sherpa_onnx
 
-            recognizer_config = sherpa_onnx.OnlineRecognizerConfig(
-                model_config=sherpa_onnx.OnlineModelConfig(
-                    transducer=sherpa_onnx.OnlineTransducerModelConfig(
-                        encoder=self._model_paths.asr_encoder,
-                        decoder=self._model_paths.asr_decoder,
-                        joiner=self._model_paths.asr_joiner,
-                    ),
-                    tokens=self._model_paths.asr_tokens,
-                ),
-                # 解码配置：多路径保持中间结果
-                decoding_method="greedy_search",
-                max_active_paths=4,
-                enable_endpoint=True,
-                rule1_min_trailing_silence=1.5,
-                rule2_min_trailing_silence=0.5,
-                rule3_min_utterance_length=0.5,
+            self._online_recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                encoder=self._model_paths.asr_encoder,
+                decoder=self._model_paths.asr_decoder,
+                joiner=self._model_paths.asr_joiner,
+                tokens=self._model_paths.asr_tokens,
+                num_threads=self._num_threads,
                 sample_rate=self._audio_config.sample_rate,
             )
-
-            self._online_recognizer = sherpa_onnx.OnlineRecognizer(recognizer_config)
             self._initialized = True
-            logger.info(
-                "ASR 引擎已初始化: model=Zipformer, sample_rate=%d",
-                self._audio_config.sample_rate,
-            )
+            logger.info("ASR 引擎已初始化: model=Zipformer (streaming)")
             return True
 
         except ImportError:
@@ -123,8 +112,23 @@ class ASREngine:
             self._initialized = True
             return True
         except Exception as e:
-            logger.error("ASR 引擎初始化失败: %s", e)
-            return False
+            logger.warning("ASR 引擎初始化失败 (%s)，mock 模式", e)
+            self._initialized = True
+            return True
+
+    def ensure_loaded(self) -> bool:
+        """按需加载 ASR 模型。"""
+        return self.initialize()
+
+    def unload(self) -> None:
+        """卸载 ASR 模型以释放内存。"""
+        if self._streaming:
+            self.stop_stream()
+        self._online_recognizer = None
+        self._offline_recognizer = None
+        self._stream = None
+        self._initialized = False
+        logger.info("ASR 模型已卸载")
 
     def start_stream(self) -> None:
         """开始流式识别会话"""
@@ -219,27 +223,45 @@ class ASREngine:
 
     def transcribe(self, audio_data: np.ndarray) -> ASRResult:
         """
-        离线批量识别 (非流式，一次性输入完整音频)。
+        离线批量识别。
 
-        Args:
-            audio_data: 16kHz mono 完整的音频数据
-
-        Returns:
-            ASRResult 识别结果
+        优先分块流式解码（ESP32 长 utterance 更稳），再试 OfflineRecognizer。
         """
         if not self._initialized:
             return ASRResult(text="", is_final=True)
 
-        # 尝试离线识别器
-        if self._offline_recognizer is None and not self._init_offline():
-            # 回退到流式模拟
-            return self._transcribe_via_streaming(audio_data)
+        if not self.ensure_loaded():
+            return ASRResult(text="", is_final=True)
+
+        if self._online_recognizer is None:
+            return ASRResult(text="", is_final=True)
 
         try:
-            result = self._offline_recognizer.decode(audio_data)
-            return ASRResult(text=result.text, is_final=True)
+            if audio_data.dtype == np.int16:
+                audio = audio_data.astype(np.float32) / 32768.0
+            elif audio_data.dtype != np.float32:
+                audio = audio_data.astype(np.float32)
+            else:
+                audio = audio_data.flatten()
+
+            if len(audio) >= 8000:
+                chunked = self._transcribe_via_streaming(audio)
+                if not chunked.is_empty:
+                    return chunked
+
+            stream = self._online_recognizer.create_stream()
+            stream.accept_waveform(self._audio_config.sample_rate, audio)
+            stream.input_finished()
+
+            while self._online_recognizer.is_ready(stream):
+                self._online_recognizer.decode_stream(stream)
+
+            result_text = self._online_recognizer.get_result(stream)
+            text = result_text if isinstance(result_text, str) else ""
+            return ASRResult(text=text.strip(), is_final=True)
+
         except Exception as e:
-            logger.error("离线识别异常: %s", e)
+            logger.error("ASR 识别异常: %s", e)
             return ASRResult(text="", is_final=True)
 
     def transcribe_file(self, wav_path: str) -> ASRResult:
@@ -290,10 +312,12 @@ class ASREngine:
                 decoder=self._model_paths.asr_decoder,
                 joiner=self._model_paths.asr_joiner,
                 tokens=self._model_paths.asr_tokens,
-                num_threads=self._audio_config.sample_rate,
+                num_threads=2,
             )
+            logger.info("ASR 离线识别器已初始化 (from_transducer)")
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("ASR 离线识别器初始化失败: %s", e)
             return False
 
     def _transcribe_via_streaming(self, audio_data: np.ndarray) -> ASRResult:

@@ -29,7 +29,19 @@ htmlcov/
 
 # Model files (too large, download separately)
 models/
-audio_clips/
+audio_clips/*.wav
+
+# Native ASR worker build
+native/build/
+native/build-mips/
+native/bin/
+native/toolchain-openwrt.cmake
+
+# PlatformIO build artifacts
+firmware/.pio/
+
+# Download cache
+.cache/
 
 # Environment
 .env
