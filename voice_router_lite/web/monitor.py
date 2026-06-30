@@ -65,6 +65,10 @@ class PerformanceMonitor:
         self._audio_energy: float = 0.0
         self._audio_state: str = "idle"  # idle / listening / recording / wake
 
+        # ESP32 外接温度传感器（DS18B20 等经 WebSocket telemetry 上报）
+        self._esp32_temp_celsius: float | None = None
+        self._esp32_temp_at: float = 0.0
+
         # ------------------------------------------------------------------
         # 路由器引擎核心内存估算（仅离线引擎模块，不含 Python 运行时等开销）
         # ------------------------------------------------------------------
@@ -201,6 +205,13 @@ class PerformanceMonitor:
             self._audio_energy = energy
             self._audio_state = state
 
+    def update_esp32_temperature(self, temp_c: float) -> None:
+        """Update temperature from ESP32 external sensor telemetry."""
+        with self._lock:
+            self._esp32_temp_celsius = float(temp_c)
+            self._esp32_temp_at = time.time()
+            self.thermal_history.add(self._esp32_temp_celsius, self._esp32_temp_at)
+
     # ------------------------------------------------------------------
     #  路由器引擎资源追踪（CPU + 内存，仅离线引擎核心模块）
     # ------------------------------------------------------------------
@@ -209,7 +220,7 @@ class PerformanceMonitor:
         """更新离线引擎核心模块的内存估算值 (MB)。
 
         由 Pipeline 初始化完成后调用，传入各模块实际估算的内存总量。
-        仅包括：KWS模型 + ASR模型 + NLU模型 + 音频缓冲区。
+        仅包括：KWS模型 + NLU模型 + 音频缓冲区。
         不包含 Python 解释器、系统库等与路由器部署无关的开销。
         """
         with self._lock:
@@ -218,9 +229,9 @@ class PerformanceMonitor:
                 self._engine_ram_baseline_mb = ram_mb
 
     def record_inference_time(self, stage: str, elapsed_ms: float) -> None:
-        """记录一次推理耗时（KWS / ASR / NLU），用于估算路由器 CPU 占用。
+        """记录一次推理耗时（KWS / NLU），用于估算路由器 CPU 占用。
 
-        stage: 推理阶段标识，如 "kws", "asr", "nlu"
+        stage: 推理阶段标识，如 "kws", "nlu"
         elapsed_ms: 该阶段推理耗时（毫秒）
         """
         with self._lock:
@@ -303,7 +314,8 @@ class PerformanceMonitor:
                 },
                 "mtbf_seconds": round(mtbf, 1),
                 "mtbf_formatted": self._format_uptime(mtbf),
-                "thermal_celsius": round(self.thermal_history.latest(), 1) if self.thermal_history.latest() is not None else None,
+                "thermal_celsius": self._latest_thermal_celsius(),
+                "thermal_source": self._thermal_source(),
                 "error_count": self._error_count,
                 "request_count": self._request_count,
                 "has_psutil": HAS_PSUTIL,
@@ -340,6 +352,19 @@ class PerformanceMonitor:
         if minutes > 0:
             return f"{minutes}m {secs}s"
         return f"{secs}s"
+
+    def _latest_thermal_celsius(self) -> float | None:
+        if self._esp32_temp_celsius is not None and (time.time() - self._esp32_temp_at) < 120:
+            return round(self._esp32_temp_celsius, 1)
+        host = self.thermal_history.latest()
+        return round(host, 1) if host is not None else None
+
+    def _thermal_source(self) -> str:
+        if self._esp32_temp_celsius is not None and (time.time() - self._esp32_temp_at) < 120:
+            return "esp32"
+        if self.thermal_history.latest() is not None:
+            return "host"
+        return "none"
 
 
 # ------------------------------------------------------------------

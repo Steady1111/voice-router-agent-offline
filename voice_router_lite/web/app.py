@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,8 @@ from voice_router_lite.web.console_hub import WebConsoleHub
 from voice_router_lite.web.monitor import get_monitor, shutdown_monitor
 from voice_router_lite.web.routes import router
 from voice_router_lite.web.service import WebCommandService
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -57,10 +60,16 @@ def create_app() -> FastAPI:
 
 
 def _build_optional_asr() -> ASREngine | None:
-    if os.getenv("VOICE_ROUTER_WEB_ASR", "").lower() not in {"1", "true", "yes"}:
+    """浏览器「按住说话」需要 Web 进程加载 ASR；可用 VOICE_ROUTER_WEB_ASR=0 关闭。"""
+    if os.getenv("VOICE_ROUTER_WEB_ASR", "1").lower() in {"0", "false", "no"}:
+        logger.info("Web ASR 已关闭 (VOICE_ROUTER_WEB_ASR=0)")
         return None
     asr = ASREngine(DEFAULT_CONFIG.models, DEFAULT_CONFIG.audio)
-    return asr if asr.initialize() else None
+    if asr.initialize():
+        logger.info("Web ASR 已加载（按住说话可用）")
+        return asr
+    logger.warning("Web ASR 初始化失败，按住说话不可用")
+    return None
 
 
 def _build_web_tts() -> TTSEngine | None:

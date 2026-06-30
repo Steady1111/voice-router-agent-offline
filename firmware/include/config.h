@@ -1,11 +1,11 @@
 #pragma once
 
 // WiFi
-#define WIFI_SSID        "duanduaniPhone"
+#define WIFI_SSID        "duanduan"
 #define WIFI_PASSWORD    "12345679u"
 
 // 中枢服务（你的 Mac）
-#define HUB_HOST         "172.20.10.6"
+#define HUB_HOST         "192.168.43.245"
 #define HUB_PORT         28080
 #define HUB_WS_PATH      "/ws/audio?role=esp32"
 
@@ -54,3 +54,8 @@
 #define OLED_SCL_PIN     42
 // I2C 地址通常是 0x3C（有些模块是 0x3D）
 #define OLED_I2C_ADDR    0x3C
+
+// NTC 热敏电阻温度传感器模块（AO/DO/GND/VCC），AO 接 ADC 引脚
+// 模块自带电压分压电路，无需外接上拉电阻
+#define TEMP_SENSOR_ENABLE   1
+#define TEMP_ONEWIRE_PIN     2

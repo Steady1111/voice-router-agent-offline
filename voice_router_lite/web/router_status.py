@@ -18,17 +18,34 @@ def _daemon_state() -> str:
     return "running"
 
 
+def _lan_client_count(service: WebCommandService) -> int | None:
+    """下联设备数。量产 ubus；Mac 预研与 NLU 返回统一数据。"""
+    try:
+        from voice_router_lite.platform.openwrt import get_ubus_client
+
+        ubus = get_ubus_client()
+        if ubus.available:
+            # TODO: OpenWrt DHCP 租约计数（量产接入）
+            return None
+    except Exception:
+        pass
+
+    # Mac 预研：与 NLU「连接设备」使用同一数据源
+    from voice_router_lite.device.manager import DeviceManager
+    info = DeviceManager._get_router_info()
+    return int(info.get("connected_devices", 0))
+
+
 def get_router_status(service: WebCommandService) -> dict[str, Any]:
     """Build GET /api/router-status payload (pre-research mock + monitor)."""
     snap = get_monitor().get_snapshot()
-    mem = snap.get("memory") or {}
-    ram_used = float(mem.get("rss_mb") or mem.get("used_mb") or 0)
-    ram_total = int(mem.get("total_mb") or 128)
+    ram_used = float(snap.get("current_ram_mb") or 0)
+    ram_total = int(snap.get("target_ram_mb") or 128)
     cpu_pct = snap.get("cpu_percent")
 
     return {
         "wan_up": True,
-        "lan_clients": 0,
+        "lan_clients": _lan_client_count(service),
         "voice_daemon": _daemon_state(),
         "ram_used_mb": round(ram_used, 1),
         "ram_total_mb": ram_total,
@@ -61,6 +78,7 @@ def get_esp32_status_extended(service: WebCommandService) -> dict[str, Any]:
             "on": bool(mgr._fan_is_on),
             "level": int(mgr._fan_speed_level),
         },
+        "temperature_c": service.esp32_temperature_c,
         "last_ack_at": last_ack,
         "last_command": service.last_command or "",
     }

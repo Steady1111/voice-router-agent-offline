@@ -29,22 +29,22 @@ class PerformanceTargets:
     device_total_memory_mb: int = 128   # 目标路由器物理内存
     system_reserved_memory_mb: int = 60 # OpenWrt + Python 运行时估算
 
-    # 引擎运行时内存（峰值阶段：KWS + ASR + NLU 同时加载）
-    peak_engine_memory_mb: int = 48     # KWS 8 + ASR 25 + NLU 11 + 缓冲 5
-    asr_model_memory_mb: int = 25       # ASR 模型 + 运行时
+    # 引擎运行时内存（KWS 直驱架构，无 ASR）
+    peak_engine_memory_mb: int = 24     # KWS 8 + NLU 11 + 缓冲 5 (INT8: 17)
+    asr_model_memory_mb: int = 0        # ASR 已移除，KWS 关键词直驱 NLU
     kws_model_memory_mb: int = 8        # KWS 模型 + 运行时
     nlu_model_memory_mb: int = 11       # NLU fp32 模型 + 运行时
     nlu_model_memory_mb_int8: int = 4   # NLU INT8 运行时
     audio_buffer_memory_mb: int = 5     # 音频缓冲
 
     # 模型文件体积（磁盘）
-    asr_model_size_mb: int = 25         # sherpa zipformer zh 14M mobile
+    asr_model_size_mb: int = 0          # ASR 模型不再需要
     kws_model_size_mb: int = 5          # KWS 模型文件 < 5MB
     nlu_model_size_mb: int = 11         # NLU fp32；INT8 量化目标 3MB
     tts_clips_total_mb: int = 5         # TTS 预录制音频 < 5MB
 
     # 兼容旧字段名
-    total_memory_mb: int = 48           # = peak_engine_memory_mb
+    total_memory_mb: int = 24           # = peak_engine_memory_mb
 
 
 # ---------------------------------------------------------------------------
@@ -220,33 +220,28 @@ class PipelineConfig:
 
 
 def router_default_config() -> PipelineConfig:
-    """路由器量产默认配置（128MB OpenWrt 优化）。"""
+    """路由器量产默认配置（128MB OpenWrt 优化，KWS 直驱无 ASR）。"""
     cfg = PipelineConfig()
     cfg.deployment_mode = "router"
-    cfg.model_serial_exclusive = True
-    cfg.asr_subprocess = True
     cfg.prefer_int8_nlu = True
-    cfg.asr_lazy_load = True
-    cfg.asr_unload_after_use = True
-    cfg.asr_num_threads = 1
     cfg.enable_cgroups = True
     cfg.cgroup_cpu_quota_pct = 30
-    cfg.cgroup_memory_mb = 80
+    cfg.cgroup_memory_mb = 50                 # KWS 直驱仅需 ~17-24MB
     cfg.use_openwrt_ubus = True
     cfg.audio.buffer_duration_sec = 2.0
+    # 根据 NLU 模型精度计算实际内存
     cfg.performance.nlu_model_memory_mb = (
         cfg.performance.nlu_model_memory_mb_int8
         if os.path.exists(cfg.models.nlu_intent_model_int8)
         else cfg.performance.nlu_model_memory_mb
     )
-    if cfg.model_serial_exclusive:
-        # 峰值：ASR + NLU（KWS 已卸载）
-        cfg.performance.peak_engine_memory_mb = (
-            cfg.performance.asr_model_memory_mb
-            + cfg.performance.nlu_model_memory_mb
-            + cfg.performance.audio_buffer_memory_mb
-        )
-        cfg.performance.total_memory_mb = cfg.performance.peak_engine_memory_mb
+    # KWS 直驱架构: KWS + NLU 常驻，无 ASR 互斥
+    cfg.performance.peak_engine_memory_mb = (
+        cfg.performance.kws_model_memory_mb
+        + cfg.performance.nlu_model_memory_mb
+        + cfg.performance.audio_buffer_memory_mb
+    )
+    cfg.performance.total_memory_mb = cfg.performance.peak_engine_memory_mb
     return cfg
 
 

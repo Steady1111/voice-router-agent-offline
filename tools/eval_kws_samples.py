@@ -21,6 +21,7 @@ def _eval_dir(engine: KWSEngine, directory: Path, expect_hit: bool) -> tuple[int
     total = 0
     for wav in sorted(directory.glob("*.wav")):
         total += 1
+        engine.reset()
         audio = load_wav(str(wav))
         audio_f = audio.astype(np.float32) / 32768.0
         # Chunk 0.5s windows (KWS expects streaming chunks)

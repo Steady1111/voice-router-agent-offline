@@ -1,0 +1,188 @@
+[
+  {
+    "asr_text": "崇喜网络",
+    "target_text": "重启网络",
+    "intent": "router_reboot",
+    "seq": 3
+  },
+  {
+    "asr_text": "落又期袭击了重启一下",
+    "target_text": "路由器死机了重启一下",
+    "intent": "router_reboot",
+    "seq": 5
+  },
+  {
+    "asr_text": "重启歪饭",
+    "target_text": "重启WiFi",
+    "intent": "router_wifi_restart",
+    "seq": 6
+  },
+  {
+    "asr_text": "打开歪歪",
+    "target_text": "打开WiFi",
+    "intent": "router_wifi_restart",
+    "seq": 7
+  },
+  {
+    "asr_text": "关闭外发",
+    "target_text": "关闭WiFi",
+    "intent": "router_wifi_restart",
+    "seq": 8
+  },
+  {
+    "asr_text": "也连不上重启一下",
+    "target_text": "WiFi连不上重启一下",
+    "intent": "router_wifi_restart",
+    "seq": 9
+  },
+  {
+    "asr_text": "麻烦密码多少",
+    "target_text": "WiFi密码多少",
+    "intent": "router_wifi_config",
+    "seq": 10
+  },
+  {
+    "asr_text": "改外犯密码",
+    "target_text": "改WiFi密码",
+    "intent": "router_wifi_config",
+    "seq": 11
+  },
+  {
+    "asr_text": "外犯改革名字",
+    "target_text": "WiFi改个名字",
+    "intent": "router_wifi_config",
+    "seq": 12
+  },
+  {
+    "asr_text": "打开房客网络",
+    "target_text": "打开访客网络",
+    "intent": "router_wifi_config",
+    "seq": 13
+  },
+  {
+    "asr_text": "切换到五级频段",
+    "target_text": "切换到5G频段",
+    "intent": "router_wifi_config",
+    "seq": 15
+  },
+  {
+    "asr_text": "指示多少",
+    "target_text": "IP地址是多少",
+    "intent": "router_network_query",
+    "seq": 16
+  },
+  {
+    "asr_text": "十一连的外犯",
+    "target_text": "谁连了WiFi",
+    "intent": "router_network_query",
+    "seq": 17
+  },
+  {
+    "asr_text": "略有期运行多久了",
+    "target_text": "路由器运行多久了",
+    "intent": "router_network_query",
+    "seq": 20
+  },
+  {
+    "asr_text": "内存上多少",
+    "target_text": "内存剩多少",
+    "intent": "router_network_query",
+    "seq": 21
+  },
+  {
+    "asr_text": "皮油附载多少",
+    "target_text": "CPU负载多少",
+    "intent": "router_network_query",
+    "seq": 22
+  },
+  {
+    "asr_text": "关闭录系灯",
+    "target_text": "关闭路由器灯",
+    "intent": "router_led_control",
+    "seq": 23
+  },
+  {
+    "asr_text": "打开洛器灯",
+    "target_text": "打开路由器灯",
+    "intent": "router_led_control",
+    "seq": 24
+  },
+  {
+    "asr_text": "提掉这个设备",
+    "target_text": "踢掉这个设备",
+    "intent": "router_device_manage",
+    "seq": 25
+  },
+  {
+    "asr_text": "聘一下",
+    "target_text": "Ping一下",
+    "intent": "router_network_diag",
+    "seq": 30
+  },
+  {
+    "asr_text": "电台是正常吗",
+    "target_text": "DNS正常吗",
+    "intent": "router_network_diag",
+    "seq": 33
+  },
+  {
+    "asr_text": "检查顾健更新",
+    "target_text": "检查固件更新",
+    "intent": "router_system",
+    "seq": 34
+  },
+  {
+    "asr_text": "配置",
+    "target_text": "备份配置",
+    "intent": "router_system",
+    "seq": 35
+  },
+  {
+    "asr_text": "查看系统日制",
+    "target_text": "查看系统日志",
+    "intent": "router_system",
+    "seq": 37
+  },
+  {
+    "asr_text": "设定定时重启",
+    "target_text": "设置定时重启",
+    "intent": "router_system",
+    "seq": 38
+  },
+  {
+    "asr_text": "打开课玩死",
+    "target_text": "打开QoS",
+    "intent": "router_qos",
+    "seq": 39
+  },
+  {
+    "asr_text": "关闭科外",
+    "target_text": "关闭QoS",
+    "intent": "router_qos",
+    "seq": 40
+  },
+  {
+    "asr_text": "这台电脑的网速",
+    "target_text": "限制这台电脑的网速",
+    "intent": "router_qos",
+    "seq": 41
+  },
+  {
+    "asr_text": "打开奖场控制",
+    "target_text": "打开家长控制",
+    "intent": "router_security",
+    "seq": 45
+  },
+  {
+    "asr_text": "打开微偏方",
+    "target_text": "打开VPN",
+    "intent": "router_security",
+    "seq": 46
+  },
+  {
+    "asr_text": "寸网",
+    "target_text": "防蹭网",
+    "intent": "router_security",
+    "seq": 47
+  }
+]

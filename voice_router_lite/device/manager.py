@@ -543,6 +543,12 @@ class DeviceManager:
         if query_type == "speed":
             return {"success": True, "message": f"当前网速: {info['speed']}"}
 
+        if query_type in ("wifi_password", "password", "wifi"):
+            return {
+                "success": True,
+                "message": "当前 WiFi 密码是：12345679u（演示）",
+            }
+
         # 默认返回综合信息
         return {
             "success": True,

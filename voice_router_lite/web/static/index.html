@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>voice-router-lite</title>
-  <link rel="stylesheet" href="/style.css?v=7" />
+  <link rel="stylesheet" href="/style.css?v=20" />
 </head>
 <body>
   <header>
@@ -27,6 +27,17 @@
 
   <main>
     <div class="main-col">
+      <div class="pipeline-demo" id="pipeline-demo">
+        <div class="pipeline-step" id="pipe-wake"><strong>① 唤醒</strong><span>—</span></div>
+        <div class="pipeline-step" id="pipe-asr"><strong>② 识别</strong><span>—</span></div>
+        <div class="pipeline-step" id="pipe-nlu"><strong>③ 意图</strong><span>—</span></div>
+      </div>
+
+      <section class="side-panel side-panel-compact main-device-panel">
+        <h2>设备状态</h2>
+        <ul id="device-list" class="device-list"></ul>
+      </section>
+
       <div class="wake-card debug-only" id="wake-card">
         <div class="wake-card-icon">🎤</div>
         <div class="wake-card-text">
@@ -50,6 +61,24 @@
         <button type="submit">发送</button>
       </form>
 
+      <div class="suggest-cmds" id="suggest-cmds">
+        <span class="suggest-label">推荐指令</span>
+        <div class="suggest-chips">
+          <button type="button" class="suggest-chip" data-cmd="重启路由器">重启路由器</button>
+          <button type="button" class="suggest-chip" data-cmd="WiFi密码多少">WiFi密码多少</button>
+          <button type="button" class="suggest-chip" data-cmd="打开访客网络">打开访客网络</button>
+          <button type="button" class="suggest-chip" data-cmd="打开风扇">打开风扇</button>
+          <button type="button" class="suggest-chip" data-cmd="关闭风扇">关闭风扇</button>
+        </div>
+      </div>
+
+      <div class="router-cmds" id="router-cmds">
+        <label class="suggest-label" for="router-cmd-select">路由器指令</label>
+        <select id="router-cmd-select" class="router-cmd-select" aria-label="路由器指令列表">
+          <option value="">选择指令发送…</option>
+        </select>
+      </div>
+
       <audio id="tts-player" hidden preload="auto"></audio>
     </div>
 
@@ -60,33 +89,20 @@
           <li><span>WAN</span><span id="router-wan">—</span></li>
           <li><span>下联设备</span><span id="router-clients">—</span></li>
           <li><span>语音服务</span><span id="router-daemon">—</span></li>
-          <li><span>内存</span><span id="router-ram">—</span></li>
+          <li><span>内存占用</span><span id="router-ram">—</span></li>
+          <li><span>CPU 估算</span><span id="router-cpu">—</span></li>
+          <li><span>最后指令</span><span id="router-last-cmd">—</span></li>
         </ul>
       </section>
 
-      <section class="side-panel status-card" id="fan-card">
-        <h2>风扇</h2>
-        <ul class="status-lines" id="fan-lines">
-          <li><span>ESP32</span><span id="fan-esp32">—</span></li>
-          <li><span>状态</span><span id="fan-state">—</span></li>
-          <li><span>档位</span><span id="fan-level">—</span></li>
-          <li><span>最后指令</span><span id="fan-last-cmd">—</span></li>
-        </ul>
-      </section>
-
-      <section class="side-panel collapsible debug-only" id="monitor-panel">
-        <h2 class="collapsible-header" id="monitor-toggle">
-          性能监控
-          <span class="collapse-arrow">▶</span>
-        </h2>
-        <div class="collapsible-body">
-          <div class="monitor-host" id="monitor-host">加载中…</div>
-          <div class="monitor-grid" id="monitor-grid"></div>
-        </div>
+      <section class="side-panel side-panel-compact" id="monitor-panel">
+        <h2>性能监控</h2>
+        <div class="monitor-host" id="monitor-host">加载中…</div>
+        <div class="monitor-grid" id="monitor-grid"></div>
       </section>
     </div>
   </main>
 
-  <script src="/app.js?v=7" type="module"></script>
+  <script src="/app.js?v=30"></script>
 </body>
 </html>

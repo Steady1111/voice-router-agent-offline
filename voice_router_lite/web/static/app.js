@@ -1,21 +1,21 @@
 // DOM 缓存
 const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+const DEMO = new URLSearchParams(location.search).get("demo") === "1" || DEBUG;
 
 const els = {
   talkBtn: document.getElementById("talk-btn"),
   ttsPlayer: document.getElementById("tts-player"),
   routerDot: document.getElementById("router-dot"),
   routerHeaderText: document.getElementById("router-header-text"),
-  fanDot: document.getElementById("fan-dot"),
-  fanHeaderText: document.getElementById("fan-header-text"),
   routerWan: document.getElementById("router-wan"),
   routerClients: document.getElementById("router-clients"),
   routerDaemon: document.getElementById("router-daemon"),
   routerRam: document.getElementById("router-ram"),
-  fanEsp32: document.getElementById("fan-esp32"),
-  fanState: document.getElementById("fan-state"),
-  fanLevel: document.getElementById("fan-level"),
-  fanLastCmd: document.getElementById("fan-last-cmd"),
+  routerCpu: document.getElementById("router-cpu"),
+  routerLastCmd: document.getElementById("router-last-cmd"),
+  fanDot: document.getElementById("fan-dot"),
+  fanHeaderText: document.getElementById("fan-header-text"),
+  deviceList: document.getElementById("device-list"),
   // 顶栏状态
   wakeDot: document.getElementById("wake-dot"),
   wakeText: document.getElementById("wake-text"),
@@ -30,10 +30,16 @@ const els = {
   // 文本调试
   textForm: document.getElementById("text-form"),
   textInput: document.getElementById("text-input"),
+  suggestCmds: document.getElementById("suggest-cmds"),
+  routerCmdSelect: document.getElementById("router-cmd-select"),
   // 性能监控
   monitorGrid: document.getElementById("monitor-grid"),
   monitorPanel: document.getElementById("monitor-panel"),
   monitorToggle: document.getElementById("monitor-toggle"),
+  pipelineDemo: document.getElementById("pipeline-demo"),
+  pipeWake: document.getElementById("pipe-wake"),
+  pipeAsr: document.getElementById("pipe-asr"),
+  pipeNlu: document.getElementById("pipe-nlu"),
 };
 
 // WebSocket / Audio 状态
@@ -45,6 +51,53 @@ let recording = false;
 let pcmChunks = [];
 
 // 设备图标映射
+function updatePipelineStep(el, label, value) {
+  if (!el) return;
+  const span = el.querySelector("span");
+  if (span) span.textContent = value || "—";
+}
+
+function setPipelineWake(keyword, wakeSource) {
+  if (!keyword && !wakeSource) {
+    updatePipelineStep(els.pipeWake, "① 唤醒", "—");
+    return;
+  }
+  const src = wakeSource ? `（${wakeSource}）` : "";
+  updatePipelineStep(els.pipeWake, "① 唤醒", `「${keyword || "小T小T"}」${src}`);
+}
+
+function clearPipelineWake() {
+  updatePipelineStep(els.pipeWake, "① 唤醒", "—");
+}
+
+let pendingVoiceCommand = null;
+
+function displayCommandText(result) {
+  if (!result) return "";
+  return (result.command || result.transcript || "").trim();
+}
+
+function setPipelineAsr(text) {
+  updatePipelineStep(els.pipeAsr, "② 识别", text || "—");
+}
+
+function setPipelineNlu(result) {
+  if (!result || !result.intent) {
+    updatePipelineStep(els.pipeNlu, "③ 意图", "—");
+    return;
+  }
+  const conf = result.confidence != null ? ` ${(result.confidence * 100).toFixed(0)}%` : "";
+  const slots = result.slots && Object.keys(result.slots).length
+    ? ` · ${Object.entries(result.slots).map(([k, v]) => `${k}=${v}`).join(", ")}`
+    : "";
+  updatePipelineStep(els.pipeNlu, "③ 意图", `${result.intent}${conf}${slots}`);
+}
+
+function applyDemoMode() {
+  // 流水线与推荐指令始终展示；demo=1 仅作兼容标记
+  if (els.pipelineDemo) els.pipelineDemo.hidden = false;
+}
+
 const DEVICE_ICONS = {
   light_livingroom: "💡",
   light_bedroom: "🛏️",
@@ -220,32 +273,44 @@ function onWsMessage(ev) {
     const msg = JSON.parse(ev.data);
     switch (msg.event) {
       case "transcript":
-        addChatMessage("user", msg.text, msg.source, msg.raw_asr);
+        if (msg.text) setPipelineAsr(msg.text);
         break;
-      case "reply":
-        addChatMessage("assistant", msg.text, msg.source);
+      case "reply": {
+        const userCmd = displayCommandText(msg.result);
+        pendingVoiceCommand = null;
+        const src = msg.source || "browser";
+        if (userCmd) {
+          setPipelineAsr(userCmd);
+          addChatMessage("user", userCmd, src);
+        }
+        setPipelineNlu(msg.result);
+        addChatMessage("assistant", msg.text, src, msg.result);
         refreshDevices();
         refreshRouterStatus();
-        resetWakeStatus();
-        // 延迟一帧再播，避免与 DOM 更新抢焦点
+        if (src === "esp32") resetWakeStatus();
         setTimeout(() => speakReply(msg.text), 0);
         break;
+      }
       case "tts_audio":
         pendingAudioChunks = [];
         pendingTtsFormat = msg.format || "mpeg";
         break;
       case "done":
-        // 已有语音朗读时跳过短提示音，避免打断播报
         if (pendingAudioChunks.length > 0) {
           if (!(window.speechSynthesis && window.speechSynthesis.speaking)) {
             playTtsAudio(pendingAudioChunks);
           }
           pendingAudioChunks = [];
         }
+        // 唤醒听指令期间，TTS done 不要清掉红灯/读秒
+        if (esp32LedMode !== "wake") {
+          resetWakeStatus();
+        }
         break;
       case "wake_detected": {
-        const src = msg.wake_source ? ` · ${msg.wake_source}` : "";
-        showWakeDetected(msg.keyword, src);
+        const src = msg.wake_source || "volume";
+        setPipelineWake(msg.keyword, src);
+        showWakeDetected(msg.keyword, src ? ` · ${src}` : "");
         break;
       }
       case "collecting":
@@ -280,16 +345,20 @@ function playTtsAudio(chunks) {
 }
 
 // 对话气泡
-function addChatMessage(role, text, source, rawAsr) {
+function addChatMessage(role, text, source, nluResult) {
   if (!text) return;
   els.chatEmpty.style.display = "none";
 
   const now = new Date();
   const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
   const sourceLabel = source === "esp32" ? " · ESP32" : source === "browser" ? " · 网页" : "";
-  const hint = rawAsr && rawAsr !== text
-    ? `<div class="chat-msg-hint">识别为「${escapeHtml(rawAsr)}」</div>`
-    : "";
+  let hint = "";
+  if (role === "assistant" && nluResult?.intent) {
+    const conf = nluResult.confidence != null
+      ? `${(nluResult.confidence * 100).toFixed(0)}%`
+      : "—";
+    hint = `<div class="chat-msg-hint">意图：${escapeHtml(nluResult.intent)}（置信度 ${conf}）</div>`;
+  }
 
   const div = document.createElement("div");
   div.className = `chat-msg ${role}`;
@@ -301,8 +370,8 @@ function addChatMessage(role, text, source, rawAsr) {
   `;
   els.chatList.appendChild(div);
 
-  // 限制最多 40 条，超出删旧
-  while (els.chatList.children.length > 40) {
+  // 限制最多 15 条，超出删旧
+  while (els.chatList.children.length > 15) {
     els.chatList.firstElementChild.remove();
   }
 
@@ -317,73 +386,216 @@ function escapeHtml(s) {
 }
 
 // ====== 录音 ======
-async function startRecording() {
-  if (recording) return;
-  recording = true;
-  els.talkBtn.classList.add("recording");
-  els.talkBtn.querySelector(".talk-btn-text").textContent = "松开发送";
+let recordingStartPromise = null;
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-  const source = audioCtx.createMediaStreamSource(mediaStream);
+function mergePcmChunks(chunks) {
+  const total = chunks.reduce((s, c) => s + c.byteLength, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.byteLength;
+  }
+  return merged;
+}
 
-  const workletCode = `
-    class PCM16Capture extends AudioWorkletProcessor {
-      process(inputs) {
-        const ch = inputs[0][0];
-        if (!ch) return true;
-        const out = new Int16Array(ch.length);
-        for (let i = 0; i < ch.length; i++) {
-          const s = Math.max(-1, Math.min(1, ch[i]));
-          out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        this.port.postMessage(out.buffer, [out.buffer]);
-        return true;
-      }
-    }
-    registerProcessor("pcm16-capture", PCM16Capture);
-  `;
-  const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "text/javascript" }));
-  await audioCtx.audioWorklet.addModule(blobUrl);
+function resamplePcm16To16k(pcmBytes, fromRate) {
+  if (fromRate === 16000) return pcmBytes;
+  const samples = new Int16Array(
+    pcmBytes.buffer,
+    pcmBytes.byteOffset,
+    pcmBytes.byteLength / 2,
+  );
+  const ratio = 16000 / fromRate;
+  const outLen = Math.max(1, Math.round(samples.length * ratio));
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i += 1) {
+    const src = i / ratio;
+    const idx = Math.floor(src);
+    const frac = src - idx;
+    const a = samples[Math.min(idx, samples.length - 1)] || 0;
+    const b = samples[Math.min(idx + 1, samples.length - 1)] || 0;
+    out[i] = Math.round(a + (b - a) * frac);
+  }
+  return new Uint8Array(out.buffer);
+}
 
-  workletNode = new AudioWorkletNode(audioCtx, "pcm16-capture");
-  workletNode.port.onmessage = (e) => pcmChunks.push(new Uint8Array(e.data));
-  source.connect(workletNode);
+function resetTalkButton() {
+  if (!els.talkBtn) return;
+  els.talkBtn.classList.remove("recording");
+  const label = els.talkBtn.querySelector(".talk-btn-text");
+  if (label) label.textContent = "按住说话";
+}
 
-  ensureSocket();
-  const send = () => {
-    ws.send(JSON.stringify({
-      event: "start",
-      sample_rate: audioCtx.sampleRate,
-      format: "pcm_s16le",
-    }));
+function micAccessHint() {
+  const host = location.hostname;
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  if (!window.isSecureContext && !isLocal) {
+    return `当前地址 ${location.origin} 不是安全上下文，浏览器会禁用麦克风。请改用 http://localhost:28080 打开（本机），或使用下方文本框。`;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return "当前窗口不支持麦克风（常见于 Cursor 内置预览）。请用 Chrome/Safari 打开 http://localhost:28080。";
+  }
+  return "";
+}
+
+let lastMicErrorText = "";
+let lastMicErrorAt = 0;
+
+function reportMicError(err) {
+  const name = err?.name || "";
+  let detail = err?.message || String(err);
+  if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+    detail = "浏览器拒绝了麦克风权限，请在地址栏左侧打开网站设置并允许麦克风";
+  } else if (name === "NotFoundError") {
+    detail = "未检测到麦克风设备";
+  } else if (detail === "当前浏览器不支持麦克风") {
+    detail = micAccessHint() || detail;
+  }
+  const text = "麦克风不可用：" + detail;
+  const now = Date.now();
+  if (text === lastMicErrorText && now - lastMicErrorAt < 3000) return;
+  lastMicErrorText = text;
+  lastMicErrorAt = now;
+  addChatMessage("assistant", text + "。路由器指令可直接用下方文本框。", "browser");
+}
+
+async function requestMicStream() {
+  const hint = micAccessHint();
+  if (hint) throw new Error(hint);
+
+  const constraints = {
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
   };
-  if (ws.readyState === 1) send();
-  else ws.addEventListener("open", send, { once: true });
-  pcmChunks = [];
+  if (navigator.mediaDevices?.getUserMedia) {
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+  const legacy = navigator.getUserMedia
+    || navigator.webkitGetUserMedia
+    || navigator.mozGetUserMedia;
+  if (!legacy) {
+    throw new Error(micAccessHint() || "当前浏览器不支持麦克风");
+  }
+  return new Promise((resolve, reject) => {
+    legacy.call(navigator, constraints, resolve, reject);
+  });
+}
+
+async function startRecording() {
+  if (recording || recordingStartPromise) return;
+
+  recordingStartPromise = (async () => {
+    const stream = await requestMicStream();
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = ctx.createMediaStreamSource(stream);
+
+    const workletCode = `
+      class PCM16Capture extends AudioWorkletProcessor {
+        process(inputs) {
+          const ch = inputs[0][0];
+          if (!ch) return true;
+          const out = new Int16Array(ch.length);
+          for (let i = 0; i < ch.length; i++) {
+            const s = Math.max(-1, Math.min(1, ch[i]));
+            out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          }
+          this.port.postMessage(out.buffer, [out.buffer]);
+          return true;
+        }
+      }
+      registerProcessor("pcm16-capture", PCM16Capture);
+    `;
+    const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "text/javascript" }));
+    await ctx.audioWorklet.addModule(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+
+    const node = new AudioWorkletNode(ctx, "pcm16-capture");
+    pcmChunks = [];
+    node.port.onmessage = (e) => pcmChunks.push(new Uint8Array(e.data));
+    source.connect(node);
+
+    mediaStream = stream;
+    audioCtx = ctx;
+    workletNode = node;
+    recording = true;
+
+    els.talkBtn.classList.add("recording");
+    els.talkBtn.querySelector(".talk-btn-text").textContent = "松开发送";
+    clearPipelineWake();
+
+    ensureSocket();
+    const send = () => {
+      ws.send(JSON.stringify({
+        event: "start",
+        sample_rate: 16000,
+        format: "pcm_s16le",
+      }));
+    };
+    if (ws.readyState === 1) send();
+    else ws.addEventListener("open", send, { once: true });
+  })();
+
+  try {
+    await recordingStartPromise;
+  } catch (err) {
+    console.error("[Talk] start failed:", err);
+    recording = false;
+    resetTalkButton();
+    reportMicError(err);
+  } finally {
+    recordingStartPromise = null;
+  }
 }
 
 async function stopRecording() {
+  if (recordingStartPromise) {
+    try {
+      await recordingStartPromise;
+    } catch {
+      return;
+    }
+  }
   if (!recording) return;
   recording = false;
-  els.talkBtn.classList.remove("recording");
-  els.talkBtn.querySelector(".talk-btn-text").textContent = "按住说话";
+  resetTalkButton();
 
   if (workletNode) workletNode.disconnect();
+  workletNode = null;
+  const fromRate = audioCtx?.sampleRate || 48000;
   if (audioCtx) await audioCtx.close().catch(() => {});
+  audioCtx = null;
   if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+  mediaStream = null;
 
-  if (!ws || ws.readyState !== 1) return;
-  for (const chunk of pcmChunks) ws.send(chunk);
+  if (!ws || ws.readyState !== 1) {
+    addChatMessage("assistant", "语音通道未连接，请刷新页面后重试。", "browser");
+    pcmChunks = [];
+    return;
+  }
+
+  const pcm = resamplePcm16To16k(mergePcmChunks(pcmChunks), fromRate);
+  pcmChunks = [];
+
+  if (pcm.byteLength < 3200) {
+    ws.send(JSON.stringify({ event: "stop" }));
+    addChatMessage("assistant", "录音太短，请按住按钮至少 1 秒再松开。", "browser");
+    return;
+  }
+
+  for (let i = 0; i < pcm.byteLength; i += 8192) {
+    ws.send(pcm.subarray(i, i + 8192));
+  }
   ws.send(JSON.stringify({ event: "stop" }));
 }
 
 // 按住说话
-els.talkBtn.addEventListener("mousedown", startRecording);
-els.talkBtn.addEventListener("mouseup", stopRecording);
-els.talkBtn.addEventListener("mouseleave", stopRecording);
-els.talkBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
-els.talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
+if (els.talkBtn) {
+  els.talkBtn.addEventListener("mousedown", startRecording);
+  els.talkBtn.addEventListener("mouseup", stopRecording);
+  els.talkBtn.addEventListener("mouseleave", stopRecording);
+  els.talkBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
+  els.talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
+}
 
 // F2 快捷键
 document.addEventListener("keydown", (e) => {
@@ -393,25 +605,180 @@ document.addEventListener("keyup", (e) => {
   if (e.key === "F2") { e.preventDefault(); stopRecording(); }
 });
 
-// ====== 文本调试 ======
-els.textForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const text = els.textInput.value.trim();
-  if (!text) return;
-  els.textInput.value = "";
-  addChatMessage("user", text);
+// ====== 文本指令 ======
+async function runTextCommand(text) {
+  const cmd = text.trim();
+  if (!cmd) return;
+  if (els.textInput) els.textInput.value = "";
+  addChatMessage("user", cmd);
+  clearPipelineWake();
+  setPipelineAsr(cmd);
   const resp = await fetch("/api/text", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text: cmd }),
   });
   const data = await resp.json();
-  addChatMessage("assistant", data.reply || "—");
+  setPipelineNlu(data);
+  addChatMessage("assistant", data.reply || "—", null, data);
   setTimeout(() => speakReply(data.reply), 0);
   refreshDevices();
-});
+}
+
+if (els.textForm) {
+  els.textForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await runTextCommand(els.textInput?.value || "");
+  });
+}
+
+if (els.suggestCmds) {
+  els.suggestCmds.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".suggest-chip");
+    if (!btn) return;
+    const cmd = btn.getAttribute("data-cmd");
+    if (cmd) await runTextCommand(cmd);
+  });
+}
+
+const ROUTER_CMD_GROUPS = [
+  {
+    label: "重启路由器",
+    intent: "router_reboot",
+    commands: [
+      "重启路由器",
+      "重启路由",
+      "重启网络",
+      "网络卡了重启一下",
+      "路由器死机了重启一下",
+    ],
+  },
+  {
+    label: "WiFi 开关",
+    intent: "router_wifi_restart",
+    commands: [
+      "重启WiFi",
+      "打开WiFi",
+      "关闭WiFi",
+      "WiFi连不上重启一下",
+    ],
+  },
+  {
+    label: "WiFi 配置",
+    intent: "router_wifi_config",
+    commands: [
+      "WiFi密码多少",
+      "改WiFi密码",
+      "WiFi改个名字",
+      "打开访客网络",
+      "关闭访客网络",
+      "切换到5G频段",
+    ],
+  },
+  {
+    label: "网络查询",
+    intent: "router_network_query",
+    commands: [
+      "IP地址是多少",
+      "谁连了WiFi",
+      "连了几个设备",
+      "网速怎么样",
+      "路由器运行多久了",
+      "内存剩多少",
+      "CPU负载多少",
+    ],
+  },
+  {
+    label: "指示灯",
+    intent: "router_led_control",
+    commands: [
+      "关闭路由器灯",
+      "打开路由器灯",
+    ],
+  },
+  {
+    label: "设备管理",
+    intent: "router_device_manage",
+    commands: [
+      "踢掉这个设备",
+      "拉黑这部手机",
+      "取消拉黑这个设备",
+      "查看黑名单",
+    ],
+  },
+  {
+    label: "网络诊断",
+    intent: "router_network_diag",
+    commands: [
+      "测一下网速",
+      "Ping一下",
+      "延迟多少",
+      "网络诊断",
+      "DNS正常吗",
+    ],
+  },
+  {
+    label: "系统运维",
+    intent: "router_system",
+    commands: [
+      "检查固件更新",
+      "备份配置",
+      "恢复出厂设置",
+      "查看系统日志",
+      "设置定时重启",
+    ],
+  },
+  {
+    label: "QoS / 带宽",
+    intent: "router_qos",
+    commands: [
+      "打开QoS",
+      "关闭QoS",
+      "限制这台电脑的网速",
+      "给游戏机优先",
+    ],
+  },
+  {
+    label: "安全策略",
+    intent: "router_security",
+    commands: [
+      "打开防火墙",
+      "关闭防火墙",
+      "打开家长控制",
+      "打开VPN",
+      "防蹭网",
+    ],
+  },
+];
+
+function buildRouterCmdSelect() {
+  const sel = els.routerCmdSelect;
+  if (!sel) return;
+  for (const group of ROUTER_CMD_GROUPS) {
+    const og = document.createElement("optgroup");
+    og.label = group.label;
+    for (const cmd of group.commands) {
+      const opt = document.createElement("option");
+      opt.value = cmd;
+      opt.textContent = cmd;
+      og.appendChild(opt);
+    }
+    sel.appendChild(og);
+  }
+}
+
+if (els.routerCmdSelect) {
+  els.routerCmdSelect.addEventListener("change", async () => {
+    const cmd = els.routerCmdSelect.value;
+    if (!cmd) return;
+    els.routerCmdSelect.value = "";
+    await runTextCommand(cmd);
+  });
+}
 
 function resetWakeStatus() {
+  esp32LedMode = "idle";
+  stopWakeCountdown();
   if (els.wakeCard) {
     els.wakeCard.classList.remove("active");
     els.wakeLabel.textContent = "离线语音控制台";
@@ -421,6 +788,7 @@ function resetWakeStatus() {
   els.wakeText.textContent = "等待唤醒";
   if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = null;
+  refreshDevices();
 }
 
 // ====== 路由器 / 风扇状态卡 ======
@@ -442,9 +810,23 @@ async function refreshRouterStatus() {
     }
     if (els.routerDaemon) els.routerDaemon.textContent = data.voice_daemon || "—";
     if (els.routerRam && data.ram_used_mb != null) {
-      els.routerRam.textContent = `${data.ram_used_mb} / ${data.ram_total_mb || 128} MB`;
+      const pct = data.ram_total_mb
+        ? Math.round(data.ram_used_mb / data.ram_total_mb * 100)
+        : null;
+      els.routerRam.textContent = pct != null
+        ? `${data.ram_used_mb} / ${data.ram_total_mb} MB（${pct}%）`
+        : `${data.ram_used_mb} MB`;
     }
-  } catch { /* ignore */ }
+    if (els.routerCpu) {
+      els.routerCpu.textContent = data.cpu_pct != null ? `${data.cpu_pct}%` : "—";
+    }
+    if (els.routerLastCmd) {
+      els.routerLastCmd.textContent = data.last_command || "—";
+    }
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 async function refreshFanStatus() {
@@ -452,7 +834,6 @@ async function refreshFanStatus() {
     const resp = await fetch("/api/esp32-status");
     const data = await resp.json();
     const connected = !!data.connected;
-    const fanOn = data.fan?.on;
     if (els.fanDot) {
       els.fanDot.classList.toggle("ok", connected);
       els.fanDot.classList.toggle("bad", !connected);
@@ -460,33 +841,109 @@ async function refreshFanStatus() {
     if (els.fanHeaderText) {
       els.fanHeaderText.textContent = connected ? "风扇在线" : "风扇离线";
     }
-    if (els.fanEsp32) els.fanEsp32.textContent = connected ? "已连接" : "未连接";
-    if (els.fanState) {
-      if (!connected) els.fanState.textContent = "—";
-      else els.fanState.textContent = fanOn ? "开" : "关";
-    }
-    if (els.fanLevel) {
-      els.fanLevel.textContent = connected && data.fan?.level != null ? `${data.fan.level} 档` : "—";
-    }
-    if (els.fanLastCmd) {
-      els.fanLastCmd.textContent = data.last_command || "—";
-    }
-  } catch { /* ignore */ }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function renderDeviceRow({ icon, name, state, stateClass, meta }) {
+  return `
+    <li>
+      <div class="device-item-left">
+        <span class="device-icon">${icon}</span>
+        <span class="device-name">${escapeHtml(name)}</span>
+      </div>
+      <div class="device-item-right">
+        <span class="device-state ${stateClass}">${escapeHtml(state)}</span>
+        ${meta ? `<span class="device-meta">${escapeHtml(meta)}</span>` : ""}
+      </div>
+    </li>`;
 }
 
 async function refreshDevices() {
-  await refreshFanStatus();
+  if (!els.deviceList) return;
+  try {
+    const [, esp] = await Promise.all([
+      refreshRouterStatus(),
+      refreshFanStatus(),
+    ]);
+    const espData = esp || {};
+    const connected = !!espData.connected;
+    const fanOn = connected && !!espData.fan?.on;
+    const fanLevel = espData.fan?.level;
+    const tempC = espData.temperature_c;
+
+    const items = [
+      {
+        icon: "🌀",
+        name: "风扇",
+        state: !connected ? "离线" : (fanOn ? "开" : "关"),
+        stateClass: fanOn ? "on" : "off",
+        meta: connected && fanLevel != null ? `${fanLevel} 档` : "",
+      },
+      {
+        icon: "🌡️",
+        name: "温度",
+        state: tempC != null ? `${Number(tempC).toFixed(1)}°C` : "—",
+        stateClass: tempC != null ? "on" : "off",
+        meta: connected ? "ESP32 传感器" : "",
+      },
+      {
+        icon: "💡",
+        name: "ESP32 指示灯",
+        ...esp32IndicatorView(connected, fanOn),
+      },
+    ];
+
+    els.deviceList.innerHTML = items.map(renderDeviceRow).join("");
+  } catch { /* ignore */ }
 }
 
 // ====== 网络状态 ======
 async function refreshNetwork() {
-  await refreshRouterStatus();
+  await refreshDevices();
 }
 
 // ====== 唤醒状态 ======
 let wakeTimer = null;
+let esp32LedMode = "idle"; // idle | wake | fan_on
+let wakeCountdownIv = null;
+let wakeCountdownLeft = 0;
+
+function stopWakeCountdown() {
+  if (wakeCountdownIv) clearInterval(wakeCountdownIv);
+  wakeCountdownIv = null;
+  wakeCountdownLeft = 0;
+}
+
+function startWakeCountdown(seconds = 10) {
+  stopWakeCountdown();
+  wakeCountdownLeft = seconds;
+  refreshDevices();
+  wakeCountdownIv = setInterval(() => {
+    wakeCountdownLeft -= 1;
+    refreshDevices();
+    if (wakeCountdownLeft <= 0) stopWakeCountdown();
+  }, 1000);
+}
+
+function esp32IndicatorView(connected, fanOn) {
+  if (!connected) {
+    return { state: "离线", stateClass: "off", meta: "" };
+  }
+  if (esp32LedMode === "wake") {
+    const meta = wakeCountdownLeft > 0 ? `听指令 ${wakeCountdownLeft}s` : "听指令中";
+    return { state: "红灯", stateClass: "wake", meta };
+  }
+  if (fanOn) {
+    return { state: "绿灯", stateClass: "on", meta: "风扇运行" };
+  }
+  return { state: "绿灯", stateClass: "on", meta: "待机监听" };
+}
 
 function showWakeDetected(keyword, sourceHint = "") {
+  esp32LedMode = "wake";
   const now = new Date();
   const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const label = keyword
@@ -503,24 +960,20 @@ function showWakeDetected(keyword, sourceHint = "") {
   els.wakeText.textContent = "唤醒 " + timeStr + (sourceHint || "");
 
   if (wakeTimer) clearTimeout(wakeTimer);
-  wakeTimer = setTimeout(resetWakeStatus, 8000);
+  wakeTimer = setTimeout(resetWakeStatus, 12000);
+  startWakeCountdown(12);
+  refreshDevices();
 }
 
-function showCollecting(text) {
+function showCollecting(text, { forEsp32 = true } = {}) {
+  if (!forEsp32) return;
+  esp32LedMode = "wake";
   if (els.wakeCard) els.wakeCard.classList.add("active");
   if (els.wakeLabel) els.wakeLabel.textContent = text || "正在听指令…";
   els.wakeDot.classList.add("active");
   els.wakeText.textContent = "录音中";
-}
-
-function resetWakeStatus() {
-  els.wakeCard.classList.remove("active");
-  els.wakeLabel.textContent = "离线语音控制台";
-  els.wakeTime.textContent = "";
-  els.wakeDot.classList.remove("active");
-  els.wakeText.textContent = "等待唤醒";
-  if (wakeTimer) clearTimeout(wakeTimer);
-  wakeTimer = null;
+  startWakeCountdown(12);
+  refreshDevices();
 }
 
 // ====== 性能监控 ======
@@ -598,7 +1051,7 @@ const MONITOR_CARDS = [
   },
   {
     id: "thermal",
-    label: "芯片温度",
+    label: "温度",
     unit: "°C",
     key: "thermal_celsius",
     historyKey: null,
@@ -617,6 +1070,7 @@ for (const card of MONITOR_CARDS) {
 
 // 构建监控卡片 DOM（只执行一次）
 function buildMonitorCards() {
+  if (!els.monitorGrid) return;
   els.monitorGrid.innerHTML = MONITOR_CARDS.map((card) => {
     if (card.template === "audio") {
       // 音频电平：音量条 + 状态标签
@@ -773,6 +1227,21 @@ async function refreshMonitor() {
       const valueEl = cardEl?.querySelector(".monitor-card-value");
       const sparkCanvas = document.getElementById(`spark-${card.id}`);
 
+      if (card.id === "thermal") {
+        const src = snapshot.thermal_source;
+        let footerEl = cardEl?.querySelector(".monitor-card-footer");
+        if (!footerEl && cardEl) {
+          footerEl = document.createElement("div");
+          footerEl.className = "monitor-card-footer";
+          cardEl.appendChild(footerEl);
+        }
+        if (footerEl) {
+          footerEl.textContent = src === "esp32"
+            ? "ESP32 外接传感器"
+            : (src === "host" ? "本机 thermal" : "等待 ESP32 上报");
+        }
+      }
+
       // 更新数值
       if (valueEl) {
         if (value === null || value === undefined) {
@@ -804,8 +1273,10 @@ async function refreshMonitor() {
         drawSparkline(sparkCanvas, history);
       }
     }
-  } catch {
-    // 静默失败
+  } catch (err) {
+    const hostLabel = document.getElementById("monitor-host");
+    if (hostLabel) hostLabel.textContent = "监控加载失败，请刷新页面";
+    console.warn("[monitor]", err);
   }
 }
 
@@ -848,29 +1319,29 @@ function drawSparkline(canvas, data) {
   ctx.fill();
 }
 
-// 监控面板折叠切换
-if (els.monitorToggle) {
-  els.monitorToggle.addEventListener("click", () => {
-    els.monitorPanel.classList.toggle("collapsed");
-  });
-}
-
 function applyDebugMode() {
   document.body.classList.toggle("debug-mode", DEBUG);
-  if (!DEBUG && els.monitorPanel) {
-    els.monitorPanel.classList.add("collapsed");
-  }
 }
 
 // ====== 初始化 ======
-applyDebugMode();
-buildMonitorCards();
-refreshRouterStatus();
-refreshFanStatus();
-if (DEBUG) refreshMonitor();
-refreshNetwork();
-setInterval(refreshRouterStatus, 10000);
-setInterval(refreshFanStatus, 5000);
-setInterval(refreshNetwork, 10000);
-if (DEBUG) setInterval(refreshMonitor, 2000);
-ensureSocket();
+function boot() {
+  applyDebugMode();
+  applyDemoMode();
+  buildMonitorCards();
+  buildRouterCmdSelect();
+  refreshDevices();
+  refreshMonitor();
+  setInterval(refreshDevices, 5000);
+  setInterval(refreshMonitor, 2000);
+  ensureSocket();
+  const micHint = micAccessHint();
+  if (micHint && els.chatEmpty) {
+    els.chatEmpty.textContent = micHint + " 路由器指令请用下方文本框。";
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}

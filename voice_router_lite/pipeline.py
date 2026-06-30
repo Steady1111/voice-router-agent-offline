@@ -587,22 +587,22 @@ class VoiceRouterPipeline:
     def _log_memory_estimate(self) -> None:
         """估算内存占用，并同步到监控面板。
 
-        仅计算离线引擎核心模块（KWS/ASR/NLU模型 + 音频缓冲），
+        仅计算离线引擎核心模块（KWS/NLU模型 + 音频缓冲），
         不包含 Python 解释器、系统库等与路由器部署无关的开销。
         """
         perf = self._config.performance
+        # KWS 直驱架构：KWS + NLU 常驻，无 ASR
         if self._config.model_serial_exclusive:
             standby = (
                 perf.kws_model_memory_mb
                 + perf.nlu_model_memory_mb
             )
             peak = (
-                perf.asr_model_memory_mb
-                + perf.nlu_model_memory_mb
+                perf.nlu_model_memory_mb
                 + perf.audio_buffer_memory_mb
             )
             logger.info(
-                "内存估算(互斥): 待机 KWS+NLU=%dMB | 峰值 ASR+NLU+Buf=%dMB",
+                "内存估算(互斥): 待机 KWS+NLU=%dMB | 峰值 NLU+Buf=%dMB",
                 standby,
                 peak,
             )
@@ -610,14 +610,12 @@ class VoiceRouterPipeline:
         else:
             total = (
                 perf.kws_model_memory_mb
-                + perf.asr_model_memory_mb
                 + perf.nlu_model_memory_mb
                 + perf.audio_buffer_memory_mb
             )
             logger.info(
-                "内存估算: KWS=%dMB + ASR=%dMB + NLU=%dMB + Buffer=%dMB = %dMB (峰值引擎)",
+                "内存估算(KWS直驱): KWS=%dMB + NLU=%dMB + Buffer=%dMB = %dMB (峰值引擎)",
                 perf.kws_model_memory_mb,
-                perf.asr_model_memory_mb,
                 perf.nlu_model_memory_mb,
                 perf.audio_buffer_memory_mb,
                 total,
@@ -629,9 +627,8 @@ class VoiceRouterPipeline:
             perf.system_reserved_memory_mb + total,
             perf.device_total_memory_mb,
         )
-        logger.info("性能目标: KWS<%dms, ASR<%dms, NLU<%dms, 端到端<%dms",
+        logger.info("性能目标: KWS<%dms, NLU<%dms, 端到端<%dms",
                      perf.kws_latency_ms,
-                     perf.asr_latency_ms,
                      perf.nlu_latency_ms,
                      perf.total_latency_ms)
 

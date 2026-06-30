@@ -82,9 +82,12 @@ class KWSEngine:
         self._lock = threading.Lock()
 
         # 能量唤醒参数
+        # 注意：energy 模式只是 sherpa 不可用时的兜底。返回的 keyword 必须是唤醒词
+        # "小T小T"（与 ws_audio 的 WAKE_WORDS 集合保持一致），否则上层会把假
+        # keyword "energy_wake" 当作指令文本扔给 NLU，触发误判指令（如 LED 灯）。
         self._energy_spike_count: int = 0
-        self._energy_threshold: float = 0.05
-        self._energy_debounce_frames: int = 20  # 防抖
+        self._energy_threshold: float = 0.12
+        self._energy_debounce_frames: int = 5  # 防抖：连续高能量帧数
 
     # ------------------------------------------------------------------
     # 公开 API
@@ -327,10 +330,12 @@ class KWSEngine:
 
     def _energy_detect(self, audio_chunk: np.ndarray) -> KWSResult:
         """
-        简化能量唤醒检测。
+        简化能量唤醒检测 (sherpa-onnx 不可用时的兜底)。
 
         逻辑: 检测到短暂高能量脉冲 (如拍手/敲击) 触发唤醒。
-        适合调试阶段，正式部署应使用 sherpa-onnx KWS。
+        注意: 兜底返回的 keyword 必须是唤醒词 "小T小T"，与 ws_audio 的
+        WAKE_WORDS 集合保持一致，触发后应进入 AWAKE 状态而不是被当作
+        指令文本交给 NLU 处理。
         """
         if audio_chunk.dtype != np.float32:
             audio = audio_chunk.astype(np.float32)
@@ -342,11 +347,11 @@ class KWSEngine:
         if rms > self._energy_threshold:
             self._energy_spike_count += 1
 
-            if self._energy_spike_count >= 3:  # 连续3帧高能量
+            if self._energy_spike_count >= self._energy_debounce_frames:
                 self._energy_spike_count = 0
                 kw_result = KWSResult(
                     detected=True,
-                    keyword="energy_wake",
+                    keyword="小T小T",  # 必须是唤醒词，不要用 "energy_wake"
                     confidence=min(rms / self._energy_threshold / 10, 1.0),
                     timestamp=time.time(),
                 )

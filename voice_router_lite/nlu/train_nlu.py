@@ -210,6 +210,23 @@ def gen_data():
                 nb = bio[:len(nt)] if len(bio)>=len(nt) else bio+["O"]*(len(nt)-len(bio))
                 extra.append((nt,intent,nb))
     S.extend(extra); random.shuffle(S)
+
+    # 朗读实录误听 → 直接作为训练样本（ASR 纠错后仍可能漏网的 raw 文本）
+    misheard_path = os.path.join(
+        os.path.dirname(__file__), os.pardir, os.pardir,
+        "asr_debug", "router_readthrough", "misheard_pairs.json",
+    )
+    misheard_path = os.path.normpath(misheard_path)
+    if os.path.isfile(misheard_path):
+        with open(misheard_path, encoding="utf-8") as f:
+            pairs = json.load(f)
+        for item in pairs:
+            text = (item.get("asr_text") or "").strip()
+            intent = item.get("intent") or ""
+            if text and intent:
+                for _ in range(8):
+                    S.append((text, intent, ["O"] * len(text)))
+
     return S
 
 

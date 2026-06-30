@@ -12,6 +12,8 @@
 
 #include "config.h"
 
+
+
 namespace {
 
 // ── 数码管硬件定时器扫描（250Hz ISR，与 main loop 完全解耦，永不闪烁）──
@@ -93,6 +95,21 @@ int g_date_year = 2026, g_date_mon = 6, g_date_mday = 1, g_date_wday = 0;
 int g_date_hour = 0, g_date_min = 0;
 unsigned long g_fan_led_until = 0;  // 风扇开启后蓝灯短暂提示，到期恢复绿灯
 
+#if TEMP_SENSOR_ENABLE
+// NTC 热敏电阻模块（AO/DO/GND/VCC），用 ADC 读 AO 脚电压
+// B=3950, R0=10kΩ@25°C, 模块电压分压：NTC 接 GND，固定电阻接 VCC
+constexpr float NTC_R0     = 10000.0f;   // 25°C 时热敏电阻值
+constexpr float NTC_T0     = 298.15f;    // 25°C = 298.15K
+constexpr float NTC_B      = 3950.0f;    // B 值
+constexpr float NTC_R_FIXED = 10000.0f;  // 模块上固定分压电阻
+constexpr float NTC_VCC    = 3.3f;       // 供电电压
+
+float g_temp_c = NAN;
+bool g_temp_ok = false;
+unsigned long g_last_temp_read_ms = 0;
+unsigned long g_last_temp_tx_ms = 0;
+#endif
+
 // ============== 以下函数无变动 ==============
 
 void setStatusLed(uint8_t r, uint8_t g, uint8_t b) {
@@ -153,6 +170,39 @@ uint16_t estimateRpm(uint8_t level) {
     }
 }
 
+#if TEMP_SENSOR_ENABLE
+void readTemperature() {
+    // 多次采样取平均，减少 ADC 噪声
+    constexpr int N = 16;
+    long sum = 0;
+    for (int i = 0; i < N; i++) {
+        sum += analogRead(TEMP_ONEWIRE_PIN);
+        delay(2);
+    }
+    float avg = (float)sum / (float)N;
+    // ADC 12bit: 0-4095 → 0-VCC
+    float v = avg * NTC_VCC / 4095.0f;
+    // 电压分压：NTC 在下，固定电阻在上 → R_ntc = R_fixed * V / (VCC - V)
+    if (v < 0.05f || v > (NTC_VCC - 0.05f)) {
+        g_temp_ok = false;
+        return;
+    }
+    float r_ntc = NTC_R_FIXED * v / (NTC_VCC - v);
+    // B 参数方程: 1/T = 1/T0 + (1/B) * ln(R/R0)
+    float temp_k = 1.0f / (1.0f / NTC_T0 + logf(r_ntc / NTC_R0) / NTC_B);
+    g_temp_c = temp_k - 273.15f;
+    g_temp_ok = (g_temp_c > -20.0f && g_temp_c < 100.0f);
+}
+
+void sendTemperatureTelemetry() {
+    if (!g_temp_ok || !ws.isConnected()) return;
+    char out[72];
+    snprintf(out, sizeof(out),
+             "{\"event\":\"telemetry\",\"temperature_c\":%.1f}", g_temp_c);
+    ws.sendTXT(out);
+}
+#endif
+
 void updateOled() {
     u8g2.clearBuffer();
     char buf[32];
@@ -207,6 +257,15 @@ void updateOled() {
         snprintf(buf, sizeof(buf), "Fan: OFF");
     }
     u8g2.drawStr(0, y, buf);
+    y += 11;
+#if TEMP_SENSOR_ENABLE
+    if (g_temp_ok) {
+        snprintf(buf, sizeof(buf), "Temp: %.1fC", g_temp_c);
+    } else {
+        snprintf(buf, sizeof(buf), "Temp: --.-C");
+    }
+    u8g2.drawStr(0, y, buf);
+#endif
     u8g2.sendBuffer();
 }
 
@@ -317,10 +376,10 @@ void sendFanAck(bool on, int speedLevel) {
 void startKwsListening() {
     g_disp.recording = false;
     stopRecording();  // 先退出录音模式
+    setStatusLed(0, 8, 0);  // 绿灯：KWS 监听中（必须在 return 前）
+    dispShowDash();          // 显示 ---- 待机
     if (g_kws_listening) return;
     g_kws_listening = true;
-    setStatusLed(0, 8, 0);  // 绿色：KWS 监听中
-    dispShowDash();          // 显示 ---- 表示待机
     Serial.println("kws listening…");
 }
 
@@ -381,6 +440,7 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
             } else if (strcmp(event, "wake_detected") == 0) {
                 g_disp.recording = true;
                 g_disp.rec_start_ms = millis();
+                g_streaming = true;  // ← 必须设，否则 15s 超时不会触发
                 setStatusLed(16, 0, 0);
                 digitalWrite(LED_PIN, HIGH);
                 Serial.println("wake detected → red timer, say command");
@@ -388,6 +448,7 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
                 const char* text = doc["text"] | "";
                 Serial.printf("reply: %s\n", text);
                 g_disp.recording = false;
+                g_streaming = false; // ← 同步重置
                 setStatusLed(0, 8, 0);
                 digitalWrite(LED_PIN, LOW);
                 dispShowDash();
@@ -457,6 +518,14 @@ void setup() {
     digitalWrite(TB6612_STBY_PIN, HIGH);
 
     dispInit();
+
+#if TEMP_SENSOR_ENABLE
+    analogReadResolution(12);
+    analogSetAttenuation(ADC_11db);  // 0-3.3V 量程
+    readTemperature();
+    Serial.printf("Temp: NTC on GPIO %d (ADC), first=%.1fC ok=%d\n",
+                  TEMP_ONEWIRE_PIN, g_temp_ok ? g_temp_c : -999.0f, g_temp_ok);
+#endif
 
     // 启动自检：逐位亮「0」
     const uint8_t testDigs[] = {DISP_DIG1, DISP_DIG2, DISP_DIG3, DISP_DIG4};
@@ -548,6 +617,21 @@ void loop() {
         }
     }
 
+#if TEMP_SENSOR_ENABLE
+    // 4b. 温度采样与上报
+    {
+        unsigned long now = millis();
+        if (now - g_last_temp_read_ms > 2000) {
+            g_last_temp_read_ms = now;
+            readTemperature();
+        }
+        if (g_temp_ok && now - g_last_temp_tx_ms > 5000) {
+            g_last_temp_tx_ms = now;
+            sendTemperatureTelemetry();
+        }
+    }
+#endif
+
     // 5. 串口调试输出（每 5 秒）
     {
         unsigned long now = millis();
@@ -555,6 +639,9 @@ void loop() {
             g_last_debug_ms = now;
             Serial.printf("DEBUG: streaming=%d kws=%d ws=%d fan=%d vu=%d\n",
                 g_streaming, g_kws_listening, ws.isConnected(), g_disp.fan_on, g_vu_level);
+#if TEMP_SENSOR_ENABLE
+            Serial.printf("DEBUG: temp=%.1fC ok=%d\n", g_temp_c, g_temp_ok);
+#endif
             Serial.printf("DEBUG: DISP fan_on=%d fan_speed=%d rpm=%d digits=[%d%d%d%d]\n",
                 g_disp.fan_on, g_disp.fan_speed, estimateRpm(g_disp.fan_speed_level),
                 g_disp_digits_v[0], g_disp_digits_v[1], g_disp_digits_v[2], g_disp_digits_v[3]);

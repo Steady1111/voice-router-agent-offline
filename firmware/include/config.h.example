@@ -24,3 +24,7 @@
 
 // 每帧 PCM 的采样点数（16kHz 下约 32ms）
 #define FRAME_SAMPLES    512
+
+// DS18B20 温度传感器（OneWire，DQ → GPIO，4.7k 上拉到 3V3）
+#define TEMP_SENSOR_ENABLE   1
+#define TEMP_ONEWIRE_PIN     2
