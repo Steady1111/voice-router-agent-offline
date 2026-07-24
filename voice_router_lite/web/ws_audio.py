@@ -401,6 +401,22 @@ async def _process_esp32_utterance(
             "[ESP32] NLU intent=%s success=%s reply=%s",
             result.get("intent"), success, reply_text,
         )
+
+        try:
+            from voice_router_lite.web.asr_debug import save_asr_debug_sample
+
+            save_asr_debug_sample(
+                audio_int16.tobytes(),
+                raw_asr=raw_asr,
+                repaired=display_cmd if display_cmd != raw_asr else "",
+                command=display_cmd or text_for_nlu,
+                intent=str(result.get("intent") or ""),
+                success=success,
+                wake_source="volume",
+                peak=int(np.max(np.abs(audio_int16))) if len(audio_int16) else 0,
+            )
+        except Exception:
+            logger.exception("[ESP32] asr_debug 落盘失败")
     except Exception:
         get_monitor().record_error()
         raise
@@ -526,6 +542,22 @@ async def _process_audio_turn(
         get_monitor().record_request(elapsed, success)
         if result.get("confidence") is not None:
             get_monitor().record_accuracy(float(result["confidence"]))
+
+        try:
+            from voice_router_lite.web.asr_debug import save_asr_debug_sample
+
+            save_asr_debug_sample(
+                audio.tobytes(),
+                raw_asr=raw_asr,
+                repaired=display_cmd if display_cmd != raw_asr else "",
+                command=display_cmd or raw_asr,
+                intent=str(result.get("intent") or ""),
+                success=success,
+                wake_source="browser",
+                peak=int(np.max(np.abs(audio))) if len(audio) else 0,
+            )
+        except Exception:
+            logger.exception("[WS Browser] asr_debug 落盘失败")
     except Exception:
         get_monitor().record_error()
         raise

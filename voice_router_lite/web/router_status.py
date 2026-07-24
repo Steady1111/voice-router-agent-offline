@@ -19,7 +19,7 @@ def _daemon_state() -> str:
 
 
 def _lan_client_count(service: WebCommandService) -> int | None:
-    """下联设备数。量产 ubus；Mac 预研与 NLU 返回统一数据。"""
+    """下联设备数。量产 ubus；Mac 预研优先热点 ARP，再回退 DeviceManager。"""
     try:
         from voice_router_lite.platform.openwrt import get_ubus_client
 
@@ -27,6 +27,15 @@ def _lan_client_count(service: WebCommandService) -> int | None:
         if ubus.available:
             # TODO: OpenWrt DHCP 租约计数（量产接入）
             return None
+    except Exception:
+        pass
+
+    try:
+        from voice_router_lite.web.hotspot import mac_hotspot_client_count
+
+        hotspot_n = mac_hotspot_client_count()
+        if hotspot_n is not None:
+            return int(hotspot_n)
     except Exception:
         pass
 

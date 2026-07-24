@@ -31,10 +31,12 @@
 ```bash
 pip install platformio
 cp include/config.h.example include/config.h
-# 编辑 config.h，填入你的 WiFi 与中枢的 host:port
+# 编辑 config.h，填入你的 WiFi 与中枢的 host:port（config.h 不入库）
 pio run -t upload
 pio device monitor
 ```
+
+串口调试脚本见 `scripts/dev/`。
 
 ## 通信协议
 

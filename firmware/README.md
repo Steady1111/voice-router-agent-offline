@@ -32,10 +32,12 @@ Change them in `include/config.h` (copied from `config.h.example`).
 ```bash
 pip install platformio
 cp include/config.h.example include/config.h
-# edit config.h with your WiFi + hub host:port
+# Edit config.h with WiFi + hub host:port (config.h is gitignored)
 pio run -t upload
 pio device monitor
 ```
+
+Serial debug helpers: `scripts/dev/`.
 
 ## Wire protocol
 

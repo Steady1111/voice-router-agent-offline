@@ -12,11 +12,12 @@ venv/
 .venv/
 env/
 
-# IDE
+# IDE / local agent memory
 .idea/
 .vscode/
 *.swp
 *.swo
+.codebuddy/
 
 # OS
 .DS_Store
@@ -31,6 +32,12 @@ htmlcov/
 models/
 audio_clips/*.wav
 
+# Runtime / generated
+data/
+outputs/
+asr_debug/cmd_*.wav
+asr_debug/cmd_*.json
+
 # Native ASR worker build
 native/build/
 native/build-mips/
@@ -39,6 +46,9 @@ native/toolchain-openwrt.cmake
 
 # PlatformIO build artifacts
 firmware/.pio/
+
+# Firmware secrets (copy from config.h.example)
+firmware/include/config.h
 
 # Download cache
 .cache/

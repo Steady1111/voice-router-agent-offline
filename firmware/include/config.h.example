@@ -1,14 +1,15 @@
 // 把本文件复制为 config.h 后填入真实值。config.h 已被 gitignore，不会提交。
+//   cp include/config.h.example include/config.h
 #pragma once
 
 // WiFi
 #define WIFI_SSID        "your-ssid"
 #define WIFI_PASSWORD    "your-password"
 
-// 中枢服务（运行 server/main.py 的那台机器）
-#define HUB_HOST         "192.168.1.100"  // 中枢所在机器的局域网 IP
+// 中枢服务（运行 voice_router_lite web 的机器）
+#define HUB_HOST         "192.168.1.100"
 #define HUB_PORT         28080
-#define HUB_WS_PATH      "/ws/audio"
+#define HUB_WS_PATH      "/ws/audio?role=esp32"
 
 // 音频与 I2S 引脚
 #define SAMPLE_RATE_HZ   16000
@@ -16,15 +17,42 @@
 #define I2S_LRCLK_PIN    5   // 帧时钟 LRCLK/WS ← INMP441 WS
 #define I2S_DIN_PIN      6   // 数据输入 DIN ← INMP441 SD
 
-// 按键（内部上拉，按下为低电平）
-#define BUTTON_PIN       0
+// 按键（内部上拉，按下为低电平；部分板子 BOOT=GPIO0 常低，可改 GPIO 1）
+#define BUTTON_PIN       1
 
 // 板载 RGB 状态灯引脚（没有则设为 -1）
 #define STATUS_LED_PIN   48
 
+// 外部 LED（长脚接 GPIO，短脚接 GND，中间串限流电阻）
+#define LED_PIN          7
+
+// 风扇控制（TB6612）
+#define FAN_PIN          8   // AIN1：HIGH=转，LOW=停
+#define FAN_PWM_PIN      9   // PWMA：PWM 调速
+#define TB6612_STBY_PIN  3   // STBY：必须 HIGH
+
+// 四位数码管（段脚串约 470Ω）
+#define DISP_SEG_A       10
+#define DISP_SEG_B       11
+#define DISP_SEG_C       12
+#define DISP_SEG_D       13
+#define DISP_SEG_E       14
+#define DISP_SEG_F       15
+#define DISP_SEG_G       16
+#define DISP_SEG_DP      17
+#define DISP_DIG1        18
+#define DISP_DIG2        19
+#define DISP_DIG3        20
+#define DISP_DIG4        21
+
 // 每帧 PCM 的采样点数（16kHz 下约 32ms）
 #define FRAME_SAMPLES    512
 
-// DS18B20 温度传感器（OneWire，DQ → GPIO，4.7k 上拉到 3V3）
+// 0.96" OLED（I2C SSD1306）
+#define OLED_SDA_PIN     41
+#define OLED_SCL_PIN     42
+#define OLED_I2C_ADDR    0x3C
+
+// 温度传感器（按硬件选用；预研常用 NTC AO→ADC）
 #define TEMP_SENSOR_ENABLE   1
 #define TEMP_ONEWIRE_PIN     2
