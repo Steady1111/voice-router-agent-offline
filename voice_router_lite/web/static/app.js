@@ -66,10 +66,6 @@ function setPipelineWake(keyword, wakeSource) {
   updatePipelineStep(els.pipeWake, "① 唤醒", `「${keyword || "小T小T"}」${src}`);
 }
 
-function clearPipelineWake() {
-  updatePipelineStep(els.pipeWake, "① 唤醒", "—");
-}
-
 let pendingVoiceCommand = null;
 
 function displayCommandText(result) {
@@ -521,7 +517,7 @@ async function startRecording() {
 
     els.talkBtn.classList.add("recording");
     els.talkBtn.querySelector(".talk-btn-text").textContent = "松开发送";
-    clearPipelineWake();
+    setPipelineWake("网页麦克风");
 
     ensureSocket();
     const send = () => {
@@ -611,7 +607,7 @@ async function runTextCommand(text) {
   if (!cmd) return;
   if (els.textInput) els.textInput.value = "";
   addChatMessage("user", cmd);
-  clearPipelineWake();
+  setPipelineWake("文本输入");
   setPipelineAsr(cmd);
   const resp = await fetch("/api/text", {
     method: "POST",
@@ -813,9 +809,13 @@ async function refreshRouterStatus() {
       const pct = data.ram_total_mb
         ? Math.round(data.ram_used_mb / data.ram_total_mb * 100)
         : null;
-      els.routerRam.textContent = pct != null
-        ? `${data.ram_used_mb} / ${data.ram_total_mb} MB（${pct}%）`
-        : `${data.ram_used_mb} MB`;
+      const peak = data.ram_device_peak_mb;
+      const base = pct != null
+        ? `全机 ${data.ram_used_mb} / ${data.ram_total_mb} MB（${pct}%）`
+        : `全机 ${data.ram_used_mb} MB`;
+      els.routerRam.textContent = peak != null
+        ? `${base} · 全机峰值约 ${peak} MB`
+        : base;
     }
     if (els.routerCpu) {
       els.routerCpu.textContent = data.cpu_pct != null ? `${data.cpu_pct}%` : "—";
@@ -989,9 +989,9 @@ const MONITOR_CARDS = [
   },
   {
     id: "ram",
-    label: "内存占用",
+    label: "全机内存（路由器）",
     unit: "MB",
-    template: true, // 自定义渲染：进度条布局
+    template: true,
     critical: (v) => v > 90,
     warning: (v) => v > 70,
     icon: "🧠",
@@ -1127,6 +1127,23 @@ function buildMonitorCards() {
   }).join("");
 }
 
+function formatEngineMemoryFooter(mem, targetMb) {
+  if (!mem) {
+    return `模拟 OpenWrt 128MB · 每 2s 刷新`;
+  }
+  const phaseLabel = mem.phase === "asr_active" ? "识别峰值" : "待机";
+  const c = mem.components_mb || {};
+  const parts = [];
+  if (c.kws > 0) parts.push(`KWS ${c.kws}`);
+  if (c.nlu > 0) parts.push(`NLU ${c.nlu}${mem.nlu_variant === "int8" ? "i" : ""}`);
+  if (c.asr > 0) parts.push(`ASR ${c.asr}`);
+  if (c.buffer > 0) parts.push(`Buf ${c.buffer}`);
+  const engine = mem.engine_current_mb != null ? `引擎 ${mem.engine_current_mb}MB` : "";
+  const breakdown = parts.length ? `${phaseLabel} · ${parts.join(" + ")}` : phaseLabel;
+  const mode = mem.mode === "live_rss" ? "真机 RSS" : (mem.mode === "daemon_snapshot" ? "daemon 快照" : "量产模拟");
+  return `${mode} · ${breakdown}${engine ? ` · ${engine}` : ""}`;
+}
+
 // 更新监控数据
 async function refreshMonitor() {
   try {
@@ -1138,7 +1155,8 @@ async function refreshMonitor() {
     if (hostLabel) {
       const h = snapshot.host_info || {};
       const env = h.is_router ? "🎯 路由器" : `💻 ${h.system}`;
-      hostLabel.textContent = `${env} · ${h.node || "?"} · 目标 128MB`;
+      const note = h.note ? ` · ${h.note}` : "";
+      hostLabel.textContent = `${env} · ${h.node || "?"} · 目标 128MB${note}`;
     }
 
     for (const card of MONITOR_CARDS) {
@@ -1201,7 +1219,9 @@ async function refreshMonitor() {
         if (curEl) curEl.textContent = cur.toFixed(0) + " MB";
         if (pctEl) pctEl.textContent = pct.toFixed(0) + "%";
         if (barEl) barEl.style.width = Math.min(pct, 100) + "%";
-        if (tgtEl) tgtEl.textContent = "目标 " + target + " MB";
+        if (tgtEl) {
+          tgtEl.textContent = formatEngineMemoryFooter(snapshot.memory, target);
+        }
 
         // 状态颜色
         if (cardEl) {

@@ -22,6 +22,8 @@
     pipeline.stop_listening()
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 import time
@@ -30,7 +32,7 @@ from enum import Enum, auto
 
 import numpy as np
 
-from voice_router_lite.config import PipelineConfig, DEFAULT_CONFIG
+from voice_router_lite.config import PipelineConfig, DEFAULT_CONFIG, estimate_engine_memory
 from voice_router_lite.audio.capture import AudioCapture, save_wav
 from voice_router_lite.audio.player import AudioPlayer
 from voice_router_lite.audio.vad import VoiceActivityDetector
@@ -228,7 +230,41 @@ class VoiceRouterPipeline:
 
         logger.info("VoiceRouterPipeline 初始化完成 ✅")
         self._log_memory_estimate()
-        return True
+
+    def _publish_daemon_memory(self, phase: str | None = None) -> None:
+        """守护进程向快照文件写入当前 RSS（供 Web 控制台读取）。"""
+        try:
+            from voice_router_lite.web.router_memory import (
+                PHASE_ASR,
+                PHASE_STANDBY,
+                process_tree_rss_mb,
+                write_daemon_memory_snapshot,
+            )
+            from voice_router_lite.config import estimate_engine_memory
+
+            ph = phase or (
+                PHASE_ASR if self._router_memory_phase_asr() else PHASE_STANDBY
+            )
+            est = estimate_engine_memory(
+                self._config,
+                profile="router",
+                prefer_int8_nlu=self._config.prefer_int8_nlu,
+                phase=ph,
+            )
+            write_daemon_memory_snapshot(
+                rss_mb=process_tree_rss_mb(),
+                phase=ph,
+                estimate=est,
+            )
+        except Exception:
+            pass
+
+    def _router_memory_phase_asr(self) -> bool:
+        try:
+            from voice_router_lite.web.monitor import get_monitor
+            return get_monitor()._router_memory.phase == "asr_active"
+        except Exception:
+            return False
 
     def start(self) -> None:
         """启动管道（开始音频采集）"""
@@ -310,14 +346,27 @@ class VoiceRouterPipeline:
 
         # 1. ASR 识别
         if text is None and audio_data is not None:
-            if self._scheduler is not None:
-                text = self._scheduler.transcribe(audio_data)
-            else:
-                self._ensure_asr()
-                asr_result = self._asr.transcribe(audio_data)
-                text = asr_result.text
-                if self._config.asr_unload_after_use:
-                    self._asr.unload()
+            mem_monitor = None
+            try:
+                from voice_router_lite.web.monitor import get_monitor
+                mem_monitor = get_monitor()
+                mem_monitor.enter_router_asr()
+            except Exception:
+                mem_monitor = None
+            try:
+                if self._scheduler is not None:
+                    text = self._scheduler.transcribe(audio_data)
+                else:
+                    self._ensure_asr()
+                    asr_result = self._asr.transcribe(audio_data)
+                    text = asr_result.text
+                    if self._config.asr_unload_after_use:
+                        self._asr.unload()
+            finally:
+                if mem_monitor is not None:
+                    mem_monitor.exit_router_asr()
+                if self._config.deployment_mode == "router":
+                    self._publish_daemon_memory()
             logger.info("ASR 识别结果: '%s'", text)
 
         if not text or not text.strip():
@@ -587,44 +636,37 @@ class VoiceRouterPipeline:
     def _log_memory_estimate(self) -> None:
         """估算内存占用，并同步到监控面板。
 
-        仅计算离线引擎核心模块（KWS/NLU模型 + 音频缓冲），
+        仅计算离线引擎核心模块（KWS/ASR/NLU + 音频缓冲），
         不包含 Python 解释器、系统库等与路由器部署无关的开销。
         """
+        est = estimate_engine_memory(
+            self._config,
+            profile="router",
+            web_asr_loaded=False,
+            prefer_int8_nlu=self._config.prefer_int8_nlu,
+        )
         perf = self._config.performance
-        # KWS 直驱架构：KWS + NLU 常驻，无 ASR
         if self._config.model_serial_exclusive:
-            standby = (
-                perf.kws_model_memory_mb
-                + perf.nlu_model_memory_mb
-            )
-            peak = (
-                perf.nlu_model_memory_mb
-                + perf.audio_buffer_memory_mb
-            )
             logger.info(
-                "内存估算(互斥): 待机 KWS+NLU=%dMB | 峰值 NLU+Buf=%dMB",
-                standby,
-                peak,
+                "内存估算(互斥): 待机 KWS+NLU+Buf=%.0fMB | 峰值 NLU+ASR+Buf=%.0fMB",
+                est.engine_standby_mb,
+                est.engine_peak_mb,
             )
-            total = peak
         else:
-            total = (
-                perf.kws_model_memory_mb
-                + perf.nlu_model_memory_mb
-                + perf.audio_buffer_memory_mb
-            )
             logger.info(
-                "内存估算(KWS直驱): KWS=%dMB + NLU=%dMB + Buffer=%dMB = %dMB (峰值引擎)",
-                perf.kws_model_memory_mb,
-                perf.nlu_model_memory_mb,
-                perf.audio_buffer_memory_mb,
-                total,
+                "内存估算: KWS=%.0f + NLU=%.0f + Buf=%.0f = %.0fMB",
+                est.kws_mb,
+                est.nlu_mb,
+                est.buffer_mb,
+                est.current_mb,
             )
         logger.info(
-            "设备预算: 系统~%dMB + 峰值引擎~%dMB ≈ %dMB / %dMB",
+            "设备预算: 系统~%dMB + 引擎待机~%.0fMB / 峰值~%.0fMB ≈ %.0f / %.0fMB / %dMB",
             perf.system_reserved_memory_mb,
-            total,
-            perf.system_reserved_memory_mb + total,
+            est.engine_standby_mb,
+            est.engine_peak_mb,
+            est.device_standby_mb,
+            est.device_peak_mb,
             perf.device_total_memory_mb,
         )
         logger.info("性能目标: KWS<%dms, NLU<%dms, 端到端<%dms",
@@ -632,9 +674,14 @@ class VoiceRouterPipeline:
                      perf.nlu_latency_ms,
                      perf.total_latency_ms)
 
-        # 同步引擎内存估算到监控面板（仅离线引擎核心模块）
+        # 同步引擎内存估算到监控面板
         try:
             from voice_router_lite.web.monitor import get_monitor
-            get_monitor().update_engine_memory(float(total))
+            get_monitor().configure_router_memory(
+                self._config,
+                prefer_int8=self._config.prefer_int8_nlu,
+            )
+            if self._config.deployment_mode == "router":
+                self._publish_daemon_memory()
         except Exception:
             pass

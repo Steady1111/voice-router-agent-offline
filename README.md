@@ -31,27 +31,10 @@ Voice Router Lite 是一个**完全离线**的语音控制引擎，专为资源�
 ## 架构
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                 VoiceRouterPipeline                  │
-│                                                      │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐        │
-│  │ 音频采集 │ → │ 降噪处理 │ → │  VAD     │        │
-│  │(I2S/USB) │   │(频谱门)  │   │(WebRTC)  │        │
-│  └──────────┘   └──────────┘   └─────┬────┘        │
-│                                      ↓               │
-│  ┌──────────┐   ┌──────────┐   ┌─────┴────┐        │
-│  │ 设备控制 │ ← │  NLU     │ ← │   ASR    │        │
-│  │(GPIO/WS) │   │(CNN+LSTM)│   │(sherpa)  │        │
-│  └──────────┘   └──────────┘   └──────────┘        │
-│        ↓                               ↑             │
-│  ┌──────────┐                          │             │
-│  │   TTS    │                          │             │
-│  │(预录制)  │                          │             │
-│  └──────────┘                          │             │
-└──────────────────────────────────────────────────────┘
-        ↓                    ↓                  ↑
-   [I2S DAC]           [继电器/LED/风扇]    [麦克风]
+麦克风 → 降噪/VAD → KWS/唤醒 → ASR → NLU → 设备控制 → TTS
 ```
+
+完整选型、内存预算与端到端图见 **[docs/01-方案总览.md](docs/01-方案总览.md)**。文档索引：[docs/README.md](docs/README.md)。
 
 ## 快速开始
 
@@ -210,14 +193,26 @@ pytest tests/ -v
 bash download_models.sh
 python3 -m voice_router_lite.nlu.train_nlu
 
-# 2. 打包（见 deploy/openwrt/README.md）
+# 2. 打包
 tar czf voice_router.tar.gz voice_router_lite/ models/ audio_clips/ deploy/
 
-# 3. 路由器上运行守护进程（ALSA 直连，无 WebSocket）
+# 3. 路由器上运行守护进程（ALSA 直连）
 python3 -m voice_router_lite router --config deploy/openwrt/voice-router.json
 ```
 
-预研阶段仍用 `python3 -m voice_router_lite web` + ESP32。
+预研：`python3 -m voice_router_lite web` + ESP32。步骤与双进程说明见 **[docs/03-部署手册.md](docs/03-部署手册.md)**。
+
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [docs/README.md](docs/README.md) | 索引 |
+| [01-方案总览](docs/01-方案总览.md) | 选型与架构 |
+| [02-演示脚本](docs/02-演示脚本.md) | 演示流程 |
+| [03-部署手册](docs/03-部署手册.md) | 预研 / OpenWrt |
+| [04-开发与硬件手册](docs/04-开发与硬件手册.md) | 接线与烧录 |
+| [05-模型与数据采集](docs/05-模型与数据采集.md) | 训练与录音线 |
+| [06-优化基线](docs/06-优化基线.md) | 五项优化验收 |
 
 ## License
 

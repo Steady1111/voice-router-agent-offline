@@ -42,6 +42,7 @@ def get_router_status(service: WebCommandService) -> dict[str, Any]:
     ram_used = float(snap.get("current_ram_mb") or 0)
     ram_total = int(snap.get("target_ram_mb") or 128)
     cpu_pct = snap.get("cpu_percent")
+    mem = snap.get("memory") or {}
 
     return {
         "wan_up": True,
@@ -49,6 +50,11 @@ def get_router_status(service: WebCommandService) -> dict[str, Any]:
         "voice_daemon": _daemon_state(),
         "ram_used_mb": round(ram_used, 1),
         "ram_total_mb": ram_total,
+        "ram_engine_mb": round(ram_used, 1),
+        "ram_device_peak_mb": mem.get("device_peak_mb"),
+        "ram_device_standby_mb": mem.get("device_standby_mb"),
+        "memory_scope": mem.get("scope", "engine_estimate"),
+        "memory_note": mem.get("note"),
         "cpu_pct": round(float(cpu_pct), 1) if cpu_pct is not None else None,
         "last_command": service.last_command or "",
         "updated_at": time.time(),

@@ -5,8 +5,7 @@ MTBF, and thermal profile. Designed for the web console's monitoring panel.
 
 重要说明：
 - CPU 监控：基于实际推理耗时估算，不依赖 psutil（开发机 CPU 不代表路由器 CPU）
-- 内存监控：仅监控离线引擎核心模块（KWS/ASR/NLU/音频缓冲）的内存占用，
-  不包含 Python 解释器、系统库等与路由器部署无关的开销。
+- 内存监控：Mac 预研按 OpenWrt 量产状态机实时模拟（待机↔ASR）；真机读 /proc/meminfo + 进程 RSS
 """
 
 from __future__ import annotations
@@ -17,6 +16,9 @@ import time
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+
+from voice_router_lite.config import EngineMemoryEstimate
+from voice_router_lite.web.router_memory import RouterMemoryTracker
 
 try:
     import psutil
@@ -72,9 +74,11 @@ class PerformanceMonitor:
         # ------------------------------------------------------------------
         # 路由器引擎核心内存估算（仅离线引擎模块，不含 Python 运行时等开销）
         # ------------------------------------------------------------------
-        self._engine_ram_mb: float = 0.0      # 当前估算内存 (MB)
-        self._peak_engine_ram_mb: float = 0.0  # 峰值内存 (MB)
-        self._engine_ram_baseline_mb: float = 0.0  # 基线内存 (MB)
+        self._engine_ram_mb: float = 0.0      # 当前引擎估算 (MB)
+        self._peak_engine_ram_mb: float = 0.0  # 引擎峰值估算 (MB)
+        self._engine_ram_baseline_mb: float = 0.0  # 引擎基线 (MB)
+        self._memory_estimate: EngineMemoryEstimate | None = None
+        self._router_memory = RouterMemoryTracker()
 
         # ------------------------------------------------------------------
         # CPU 推理耗时累积（用于估算路由器 CPU 占用率）
@@ -115,13 +119,18 @@ class PerformanceMonitor:
         with self._lock:
             now = time.time()
 
-            # ---- 内存：引擎核心模块估算（不是 psutil 进程 RSS） ----
-            ram_mb = self._engine_ram_mb
+            # ---- 内存：路由器状态机 / 真机 RSS（每 2s 刷新）----
+            est = self._router_memory.tick()
+            self._memory_estimate = est
+            ram_mb = est.device_current_mb
             if ram_mb > self._peak_engine_ram_mb:
                 self._peak_engine_ram_mb = ram_mb
+            self._engine_ram_mb = ram_mb
+            if self._engine_ram_baseline_mb == 0:
+                self._engine_ram_baseline_mb = est.device_standby_mb
             self.ram_history.add(ram_mb, now)
 
-            # 碎片率：基于引擎基线内存的增长比例
+            # 碎片率：相对待机全机预算的增长
             if self._engine_ram_baseline_mb > 0:
                 frag = (ram_mb - self._engine_ram_baseline_mb) / self._engine_ram_baseline_mb * 100
                 frag = max(0, frag)
@@ -216,14 +225,41 @@ class PerformanceMonitor:
     #  路由器引擎资源追踪（CPU + 内存，仅离线引擎核心模块）
     # ------------------------------------------------------------------
 
-    def update_engine_memory(self, ram_mb: float) -> None:
-        """更新离线引擎核心模块的内存估算值 (MB)。
+    def configure_router_memory(self, cfg, *, prefer_int8: bool) -> None:
+        """绑定量产路由器配置，并立即刷新一次内存快照。"""
+        self._router_memory.configure(cfg, prefer_int8=prefer_int8)
+        est = self._router_memory.tick()
+        with self._lock:
+            self._memory_estimate = est
+            self._engine_ram_mb = est.device_current_mb
+            self._engine_ram_baseline_mb = est.device_standby_mb
+            self._peak_engine_ram_mb = max(self._peak_engine_ram_mb, est.device_current_mb)
 
-        由 Pipeline 初始化完成后调用，传入各模块实际估算的内存总量。
-        仅包括：KWS模型 + NLU模型 + 音频缓冲区。
-        不包含 Python 解释器、系统库等与路由器部署无关的开销。
+    def enter_router_asr(self, hold_sec: float = 10.0) -> None:
+        """进入 ASR 识别阶段（模拟路由器卸载 KWS、加载 ASR 子进程）。"""
+        self._router_memory.enter_asr(hold_sec=hold_sec)
+
+    def exit_router_asr(self) -> None:
+        """回到待机（KWS + NLU 常驻）。"""
+        self._router_memory.exit_asr()
+
+    def update_engine_memory(
+        self,
+        estimate: EngineMemoryEstimate | float,
+    ) -> None:
+        """更新离线引擎核心模块的内存估算 (MB)。
+
+        接受 EngineMemoryEstimate 或裸数值（兼容旧调用）。
+        仅包括：KWS / ASR / NLU 模型 + 音频缓冲区估算。
         """
         with self._lock:
+            if isinstance(estimate, EngineMemoryEstimate):
+                self._memory_estimate = estimate
+                ram_mb = estimate.device_current_mb or estimate.current_mb
+                if estimate.device_peak_mb > self._peak_engine_ram_mb:
+                    self._peak_engine_ram_mb = estimate.device_peak_mb
+            else:
+                ram_mb = float(estimate)
             self._engine_ram_mb = ram_mb
             if self._engine_ram_baseline_mb == 0:
                 self._engine_ram_baseline_mb = ram_mb
@@ -254,10 +290,18 @@ class PerformanceMonitor:
 
             current_ram_mb = self._engine_ram_mb
             peak_ram_mb = self._peak_engine_ram_mb
+            mem = self._memory_estimate.to_dict() if self._memory_estimate else None
 
-            # 目标设备：128MB 路由器
-            TARGET_RAM_MB = 128
-            ram_usage_pct = round(current_ram_mb / TARGET_RAM_MB * 100, 1) if current_ram_mb else None
+            target_ram = int(
+                (mem or {}).get("device_total_mb")
+                or self._memory_estimate.device_total_mb
+                if self._memory_estimate
+                else 128
+            )
+            ram_usage_pct = round(current_ram_mb / target_ram * 100, 1) if current_ram_mb else None
+            device_peak_pct = None
+            if mem and mem.get("device_peak_mb"):
+                device_peak_pct = round(float(mem["device_peak_mb"]) / target_ram * 100, 1)
 
             # Latency stats
             p50, p95, p99 = 0.0, 0.0, 0.0
@@ -285,11 +329,15 @@ class PerformanceMonitor:
             return {
                 "uptime_seconds": round(uptime, 1),
                 "uptime_formatted": self._format_uptime(uptime),
-                # 内存 — 以路由器 128MB 为基准，仅引擎核心模块
-                "target_ram_mb": TARGET_RAM_MB,
+                # 内存 — 以路由器物理内存为基准（全机 used / 模拟 used）
+                "target_ram_mb": target_ram,
                 "current_ram_mb": round(current_ram_mb, 1),
                 "ram_usage_pct": ram_usage_pct,
                 "peak_ram_mb": round(peak_ram_mb, 1),
+                "device_peak_pct": device_peak_pct,
+                "memory": mem,
+                "memory_mode": self._router_memory.mode,
+                "memory_phase": self._router_memory.phase,
                 "fragmentation_pct": round(self.frag_history.latest() or 0, 1),
                 # CPU — 基于实际推理耗时估算
                 "cpu_percent": round(self.cpu_history.latest() or 0, 1),
@@ -299,7 +347,10 @@ class PerformanceMonitor:
                     "node": platform.node(),
                     "machine": platform.machine(),
                     "is_router": is_router,
-                    "note": "CPU/内存均基于离线引擎核心模块估算，非开发机实际指标",
+                    "note": (
+                        mem.get("note") if mem else
+                        "全机内存：Mac 模拟 OpenWrt 量产；真机读 meminfo"
+                    ),
                 },
                 "latency": {
                     "avg_ms": round(avg_latency, 1),

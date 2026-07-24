@@ -648,8 +648,8 @@ class WebCommandService:
         # 从持久化文件恢复温度（重启不丢）
         self._load_persisted_state()
 
-        # 同步引擎内存估算到监控面板（仅离线引擎核心模块）
-        self._sync_memory_to_monitor()
+        # 绑定路由器内存跟踪（每 2s 自动刷新，ASR 时升降）
+        self.configure_router_memory_monitor()
 
     def update_esp32_temperature(self, temp_c: float) -> None:
         """更新 ESP32 温度并持久化，避免重启丢失。"""
@@ -683,19 +683,33 @@ class WebCommandService:
         except Exception:
             pass
 
-    def _sync_memory_to_monitor(self) -> None:
-        """将配置中的引擎内存估算写入监控面板（KWS 直驱，无 ASR）。"""
+    def _effective_prefer_int8(self) -> bool:
+        return (
+            self.config.prefer_int8_nlu
+            or os.getenv("VOICE_ROUTER_PREFER_INT8_NLU", "").lower() in {"1", "true", "yes"}
+        )
+
+    def _memory_profile(self) -> str:
+        mode = os.getenv("VOICE_ROUTER_DEPLOYMENT_MODE", "web").lower()
+        if self.config.deployment_mode == "router" or mode == "router":
+            return "router"
+        return "web"
+
+    def configure_router_memory_monitor(self) -> None:
+        """初始化监控：按 OpenWrt 量产配置跟踪内存（非一次性写死）。"""
         try:
             from voice_router_lite.web.monitor import get_monitor
-            perf = self.config.performance
-            total = (
-                perf.kws_model_memory_mb
-                + perf.nlu_model_memory_mb
-                + perf.audio_buffer_memory_mb
+
+            get_monitor().configure_router_memory(
+                self.config,
+                prefer_int8=self._effective_prefer_int8(),
             )
-            get_monitor().update_engine_memory(float(total))
         except Exception:
             pass
+
+    def sync_memory_to_monitor(self, *, web_asr_loaded: bool = False) -> None:
+        """兼容旧调用：刷新路由器内存配置。"""
+        self.configure_router_memory_monitor()
 
     def close(self) -> None:
         if self._initialized:

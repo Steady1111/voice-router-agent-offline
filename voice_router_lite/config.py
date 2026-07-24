@@ -5,6 +5,8 @@
 所有配置项均有默认值，支持从 YAML/JSON 文件加载。
 """
 
+from __future__ import annotations
+
 import os
 import json
 from dataclasses import dataclass, field
@@ -29,16 +31,16 @@ class PerformanceTargets:
     device_total_memory_mb: int = 128   # 目标路由器物理内存
     system_reserved_memory_mb: int = 60 # OpenWrt + Python 运行时估算
 
-    # 引擎运行时内存（KWS 直驱架构，无 ASR）
-    peak_engine_memory_mb: int = 24     # KWS 8 + NLU 11 + 缓冲 5 (INT8: 17)
-    asr_model_memory_mb: int = 0        # ASR 已移除，KWS 关键词直驱 NLU
+    # 引擎运行时内存估算（非 psutil RSS，见 estimate_engine_memory）
+    peak_engine_memory_mb: int = 24     # 默认占位；由 estimate_engine_memory 覆写
+    asr_model_memory_mb: int = 25       # ASR 子进程 / Web 常驻 sherpa 工作区峰值
     kws_model_memory_mb: int = 8        # KWS 模型 + 运行时
     nlu_model_memory_mb: int = 11       # NLU fp32 模型 + 运行时
     nlu_model_memory_mb_int8: int = 4   # NLU INT8 运行时
-    audio_buffer_memory_mb: int = 5     # 音频缓冲
+    audio_buffer_memory_mb: int = 5     # 环形缓冲 + 解码工作区（含 2s@16kHz PCM）
 
     # 模型文件体积（磁盘）
-    asr_model_size_mb: int = 0          # ASR 模型不再需要
+    asr_model_size_mb: int = 24         # zipformer zh 14M mobile 约 24MB
     kws_model_size_mb: int = 5          # KWS 模型文件 < 5MB
     nlu_model_size_mb: int = 11         # NLU fp32；INT8 量化目标 3MB
     tts_clips_total_mb: int = 5         # TTS 预录制音频 < 5MB
@@ -219,28 +221,170 @@ class PipelineConfig:
         return config
 
 
+@dataclass
+class EngineMemoryEstimate:
+    """离线引擎 / 全机内存快照（监控面板用）。"""
+
+    profile: str
+    nlu_variant: str
+    kws_mb: float
+    nlu_mb: float
+    asr_mb: float
+    buffer_mb: float
+    current_mb: float
+    engine_standby_mb: float
+    engine_peak_mb: float
+    device_standby_mb: float
+    device_peak_mb: float
+    # 运行时动态字段（tick / 状态机填充）
+    engine_current_mb: float = 0.0
+    device_current_mb: float = 0.0
+    device_total_mb: float = 128.0
+    phase: str = "standby"
+    mode: str = "router_sim"
+    scope: str = "router_sim"
+    rss_mb: float | None = None
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.engine_current_mb <= 0:
+            self.engine_current_mb = self.current_mb
+        if self.device_current_mb <= 0:
+            self.device_current_mb = (
+                self.device_standby_mb
+                if self.phase == "standby"
+                else self.device_peak_mb
+            )
+
+    def to_dict(self) -> dict:
+        return {
+            "profile": self.profile,
+            "scope": self.scope,
+            "mode": self.mode,
+            "phase": self.phase,
+            "nlu_variant": self.nlu_variant,
+            "components_mb": {
+                "kws": round(self.kws_mb, 1),
+                "nlu": round(self.nlu_mb, 1),
+                "asr": round(self.asr_mb, 1),
+                "buffer": round(self.buffer_mb, 1),
+            },
+            "engine_current_mb": round(self.engine_current_mb, 1),
+            "device_current_mb": round(self.device_current_mb, 1),
+            "device_total_mb": round(self.device_total_mb, 1),
+            "current_mb": round(self.device_current_mb, 1),
+            "engine_standby_mb": round(self.engine_standby_mb, 1),
+            "engine_peak_mb": round(self.engine_peak_mb, 1),
+            "device_standby_mb": round(self.device_standby_mb, 1),
+            "device_peak_mb": round(self.device_peak_mb, 1),
+            "rss_mb": round(self.rss_mb, 1) if self.rss_mb is not None else None,
+            "note": self.note or "Mac 预研：按 OpenWrt 量产状态机模拟（待机↔ASR 峰值）",
+        }
+
+
+def resolve_nlu_runtime_mb(
+    cfg: PipelineConfig,
+    *,
+    prefer_int8_nlu: bool | None = None,
+) -> tuple[float, str]:
+    """返回 NLU 运行时估算 (MB) 与变体标识。"""
+    perf = cfg.performance
+    use_int8 = cfg.prefer_int8_nlu if prefer_int8_nlu is None else prefer_int8_nlu
+    if use_int8 and os.path.exists(cfg.models.nlu_intent_model_int8):
+        return float(perf.nlu_model_memory_mb_int8), "int8"
+    return float(perf.nlu_model_memory_mb), "fp32"
+
+
+def estimate_engine_memory(
+    cfg: PipelineConfig,
+    *,
+    profile: str = "web",
+    web_asr_loaded: bool = False,
+    prefer_int8_nlu: bool | None = None,
+    phase: str = "standby",
+) -> EngineMemoryEstimate:
+    """按部署形态与运行阶段估算内存（与方案文档 §2.1 对齐）。
+
+    profile:
+      - web: Mac 预研 Web 服务（无 KWS；ASR 可选常驻）— 仅静态估算用
+      - router: OpenWrt daemon（KWS+NLU 待机；ASR 阶段 KWS 卸载）
+    phase:
+      - standby: KWS + NLU + Buf
+      - asr_active: NLU + ASR + Buf（互斥架构）
+    """
+    perf = cfg.performance
+    nlu_mb, nlu_variant = resolve_nlu_runtime_mb(cfg, prefer_int8_nlu=prefer_int8_nlu)
+    buffer_mb = float(perf.audio_buffer_memory_mb)
+    kws_mb = float(perf.kws_model_memory_mb) if cfg.enable_kws else 0.0
+    asr_model_mb = float(perf.asr_model_memory_mb)
+    sys_mb = float(perf.system_reserved_memory_mb)
+    asr_phase = phase == "asr_active"
+
+    if profile == "web":
+        kws_active = 0.0
+        asr_active = asr_model_mb if web_asr_loaded else 0.0
+        engine_current = nlu_mb + asr_active + buffer_mb
+        engine_standby = nlu_mb + buffer_mb
+        engine_peak = nlu_mb + asr_model_mb + buffer_mb
+    elif cfg.model_serial_exclusive:
+        engine_standby = kws_mb + nlu_mb + buffer_mb
+        engine_peak = nlu_mb + asr_model_mb + buffer_mb
+        if asr_phase:
+            kws_active = 0.0
+            asr_active = asr_model_mb
+            engine_current = engine_peak
+        else:
+            kws_active = kws_mb
+            asr_active = 0.0
+            engine_current = engine_standby
+    else:
+        kws_active = kws_mb
+        asr_active = 0.0
+        engine_current = kws_mb + nlu_mb + buffer_mb
+        engine_standby = engine_current
+        engine_peak = engine_current
+
+    device_standby = sys_mb + engine_standby
+    device_peak = sys_mb + engine_peak
+    device_current = device_peak if asr_phase else device_standby
+
+    return EngineMemoryEstimate(
+        profile=profile,
+        nlu_variant=nlu_variant,
+        kws_mb=kws_active,
+        nlu_mb=nlu_mb,
+        asr_mb=asr_active,
+        buffer_mb=buffer_mb,
+        current_mb=engine_current,
+        engine_current_mb=engine_current,
+        engine_standby_mb=engine_standby,
+        engine_peak_mb=engine_peak,
+        device_standby_mb=device_standby,
+        device_peak_mb=device_peak,
+        device_current_mb=device_current,
+        device_total_mb=float(perf.device_total_memory_mb),
+        phase=phase if profile == "router" else ("asr_active" if web_asr_loaded else "standby"),
+        mode="static_estimate",
+        scope="static_estimate",
+    )
+
+
 def router_default_config() -> PipelineConfig:
-    """路由器量产默认配置（128MB OpenWrt 优化，KWS 直驱无 ASR）。"""
+    """路由器量产默认配置（128MB OpenWrt，KWS/ASR 互斥）。"""
     cfg = PipelineConfig()
     cfg.deployment_mode = "router"
+    cfg.model_serial_exclusive = True
+    cfg.asr_subprocess = True
     cfg.prefer_int8_nlu = True
+    cfg.asr_lazy_load = True
+    cfg.asr_unload_after_use = True
     cfg.enable_cgroups = True
     cfg.cgroup_cpu_quota_pct = 30
-    cfg.cgroup_memory_mb = 50                 # KWS 直驱仅需 ~17-24MB
+    cfg.cgroup_memory_mb = 80
     cfg.use_openwrt_ubus = True
     cfg.audio.buffer_duration_sec = 2.0
-    # 根据 NLU 模型精度计算实际内存
-    cfg.performance.nlu_model_memory_mb = (
-        cfg.performance.nlu_model_memory_mb_int8
-        if os.path.exists(cfg.models.nlu_intent_model_int8)
-        else cfg.performance.nlu_model_memory_mb
-    )
-    # KWS 直驱架构: KWS + NLU 常驻，无 ASR 互斥
-    cfg.performance.peak_engine_memory_mb = (
-        cfg.performance.kws_model_memory_mb
-        + cfg.performance.nlu_model_memory_mb
-        + cfg.performance.audio_buffer_memory_mb
-    )
+    est = estimate_engine_memory(cfg, profile="router", web_asr_loaded=False)
+    cfg.performance.peak_engine_memory_mb = int(est.engine_peak_mb)
     cfg.performance.total_memory_mb = cfg.performance.peak_engine_memory_mb
     return cfg
 

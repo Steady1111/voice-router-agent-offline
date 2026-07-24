@@ -337,6 +337,8 @@ async def _process_esp32_utterance(
 
     loop = asyncio.get_event_loop()
     t0 = time.perf_counter()
+    monitor = get_monitor()
+    monitor.enter_router_asr()
     try:
         asr_t0 = time.perf_counter()
         asr_result = await loop.run_in_executor(None, asr.transcribe, audio_int16)
@@ -402,6 +404,9 @@ async def _process_esp32_utterance(
     except Exception:
         get_monitor().record_error()
         raise
+    finally:
+        monitor.exit_router_asr()
+
 
 # ==================================================================
 # 共享工具函数
@@ -478,6 +483,8 @@ async def _process_audio_turn(
         logger.info("[WS Browser] 重采样 %dHz → %dHz", sample_rate, target_rate)
 
     try:
+        monitor = get_monitor()
+        monitor.enter_router_asr()
         asr_t0 = time.perf_counter()
         asr_result = asr.transcribe(audio)
         asr_elapsed = (time.perf_counter() - asr_t0) * 1000
@@ -523,6 +530,7 @@ async def _process_audio_turn(
         get_monitor().record_error()
         raise
     finally:
+        get_monitor().exit_router_asr()
         await _send_json(websocket, {"event": "done"})
 
 

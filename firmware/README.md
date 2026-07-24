@@ -2,8 +2,10 @@
 
 > English · [中文](README.zh-CN.md)
 
-Push-to-talk mic node. Holds a button, streams 16 kHz / 16-bit / mono PCM
-over WebSocket to the hub service, then waits for the next button press.
+Push-to-talk / continuous PCM edge node. Streams 16 kHz / 16-bit / mono PCM
+over WebSocket to the hub and executes fan commands.
+
+Wiring, flash, and FAQ: **[docs/04-开发与硬件手册.md](../docs/04-开发与硬件手册.md)**.
 
 ## Hardware
 

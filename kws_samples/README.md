@@ -23,4 +23,5 @@ VOICE_ROUTER_ENERGY_WAKE=0 python3 -m voice_router_lite web   # 另终端
 python3 tools/eval_kws_samples.py --root kws_samples
 ```
 
-通过线见 OpenSpec `spec.md` AC-3b：正样本 ≥14/20，负样本误唤醒 ≤2/10。
+通过线见 [docs/06-优化基线.md](../docs/06-优化基线.md) AC-3b：正样本 ≥14/20，负样本误唤醒 ≤2/10。  
+录制与评估说明见 [docs/05-模型与数据采集.md](../docs/05-模型与数据采集.md)。

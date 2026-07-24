@@ -56,7 +56,12 @@ def run_router_daemon(config: PipelineConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     try:
+        last_mem = 0.0
         while not stop:
+            now = time.time()
+            if now - last_mem >= 2.0:
+                pipeline._publish_daemon_memory()
+                last_mem = now
             time.sleep(0.5)
     finally:
         pipeline.stop_listening()
